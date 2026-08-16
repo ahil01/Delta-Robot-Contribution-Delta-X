@@ -32,6 +32,9 @@ High Rigidity-to-Weight Ratio: Reinforced load paths and internal geometric ribb
 
 Vibration & Resonance Damping: Minimized end-effector inertia eliminates overshoot and resonance ringing during high-acceleration stops.
 
+<img width="1149" height="753" alt="Screenshot 2026-08-16 194044" src="https://github.com/user-attachments/assets/6aa293fe-6b4e-48b9-8187-138a53bde880" />
+
+
 ⚡ 2. Actuation & Precision Motion
 High-Torque NEMA 23 Motors: Upgraded from standard NEMA 17 to NEMA 23 stepper motors, delivering significantly higher holding torque and dynamic payload capacity.
 
