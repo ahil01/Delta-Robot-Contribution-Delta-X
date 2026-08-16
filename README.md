@@ -55,7 +55,9 @@ Enhanced Acceleration Profiles: High torque-to-inertia ratio allows aggressive a
 
 # 🧠 3. Compute & Control Architecture
 
-<img width="725" height="724" alt="Screenshot 2026-08-16 154953" src="https://github.com/user-attachments/assets/7cfeecb9-9bdf-4f3e-a0f1-dfc6bf7380d9" />
+<img width="554" height="554" alt="rasp 5" src="https://github.com/user-attachments/assets/f1e8e8f9-171a-47b4-b3ba-90d8fcacb1cd" />
+<img width="1800" height="1600" alt="mks" src="https://github.com/user-attachments/assets/3f4c9d12-e012-4426-971f-f3c0ba519736" />
+
 
 Distributed Hybrid Processing:
 
