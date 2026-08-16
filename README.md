@@ -19,14 +19,10 @@ Lightweight & High-Rigidity Arm Assembly: Re-engineered the arm structure to min
 
 Dynamic-Angle Vision System: Equipped with an adjustable-angle camera mount, enabling top-down, tilted, and real-time object tracking for adaptable sorting, classification, and inspection pipelines.
 
-![Uploading Screenshot 2026-08-16 010600.png…]()
+<img width="1919" height="1079" alt="Screenshot 2026-08-16 010600" src="https://github.com/user-attachments/assets/a9217b82-0a51-41a6-8f77-0d2a1cdefa47" />
 
-Feature,Base Delta X,Custom Upgraded Build,Impact / Advantage
-Control Board,8-bit / Basic MCU,32-Bit Dedicated Board,"Smoother microstepping, faster lookahead, higher step frequencies"
-SBC Coprocessor,None / Host PC dependent,Raspberry Pi Onboard,"Standalone operation, onboard OpenCV/AI model inference"
-Motors & Drive,Standard NEMA 17,Zero-Backlash NEMA 23,"Greater payload capacity, zero backlash, pinpoint repeatability"
-Vision Module,Fixed / Optional,Variable-Angle Vision Mount,Flexible workspace coverage and adaptive depth/angle tracking
-Chassis & Arms,Standard 3D printed / standard tubing,Optimized Lightweight & Rigid Frame,"Reduced inertia, dampens resonance, higher acceleration rates"
-Kinematics,Standard 3-DOF Parallel,Identical Kinematics,Full software and toolpath compatibility with standard Delta workflows
+Subsystem,Specification,Description / Role
+Chassis & Linkages,3D-Printable Rigid Frame,"Optimized for FDM printing, easy screw-together assembly, low inertia, high stiffness"
+
 
 
