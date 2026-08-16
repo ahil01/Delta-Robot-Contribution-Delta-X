@@ -21,8 +21,42 @@ Dynamic-Angle Vision System: Equipped with an adjustable-angle camera mount, ena
 
 <img width="1919" height="1079" alt="Screenshot 2026-08-16 010600" src="https://github.com/user-attachments/assets/a9217b82-0a51-41a6-8f77-0d2a1cdefa47" />
 
-Subsystem,Specification,Description / Role
-Chassis & Linkages,3D-Printable Rigid Frame,"Optimized for FDM printing, easy screw-together assembly, low inertia, high stiffness"
+# UPGRADE FEATURES
+
+🦾 1. Mechanical & Structural Design
+80% 3D-Printable Architecture: Fully redesigned components optimized for FDM/FFF 3D printing with clean overhangs and minimal support requirements.
+
+Fast & Foolproof Assembly: Uses modular interlocking joints, standardized fasteners (e.g., M3/M4 heat-set inserts and bolts), and keyed alignments for quick, repeatable assembly without complex jigs.
+
+High Rigidity-to-Weight Ratio: Reinforced load paths and internal geometric ribbing significantly increase torsional and bending stiffness while keeping moving mass minimal.
+
+Vibration & Resonance Damping: Minimized end-effector inertia eliminates overshoot and resonance ringing during high-acceleration stops.
+
+⚡ 2. Actuation & Precision Motion
+High-Torque NEMA 23 Motors: Upgraded from standard NEMA 17 to NEMA 23 stepper motors, delivering significantly higher holding torque and dynamic payload capacity.
+
+Zero-Backlash Drive Mechanism: Precision transmission design completely eliminates mechanical backlash, ensuring accurate micro-positioning and zero slop on directional reversals.
+
+Enhanced Acceleration Profiles: High torque-to-inertia ratio allows aggressive acceleration and deceleration curves without missed steps.
+
+🧠 3. Compute & Control Architecture
+Distributed Hybrid Processing:
+
+Raspberry Pi Coprocessor: Handles high-level computer vision pipelines (OpenCV), motion planning, coordinate mapping, and network/GUI interfaces.
+
+Dedicated 32-Bit Motion Controller: Manages real-time trigonometric kinematics calculations, high-frequency step pulse generation, lookahead buffering, and endstop interrupts with microsecond precision.
+
+Deterministic Low-Latency Communication: Fast UART/Serial bridge between Raspberry Pi and the 32-bit controller ensures seamless G-code and trajectory execution.
+
+👁️ 4. Dynamic Vision SystemAdjustable-Angle Camera Mount: Hardware-integrated camera bracket with variable tilt angle to accommodate top-down workspace inspection, oblique conveyor tracking, or tilted bin picking.Real-Time Object Detection & Sorting: Directly streams low-latency video to the onboard Raspberry Pi for color detection, contour extraction, bounding box estimation, and orientation detection.Adaptive Coordinate Calibration: Software-calibrated coordinate transformation mapping visual pixel coordinates directly into the Delta robot's Cartesian ($X, Y, Z$) coordinate frame
+
+
+📐 5. Kinematics & Compatibility
+Preserved 3-DOF Parallel Kinematics: Retains standard Delta parallel geometry, maintaining identical kinematic equations.
+
+Universal G-Code Compatibility: Works with standard trajectory generators, slicers, and automation toolpaths without requiring custom kinematics drivers.
+
+
 
 
 
