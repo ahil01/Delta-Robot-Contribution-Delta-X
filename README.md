@@ -43,14 +43,20 @@ Vibration & Resonance Damping: Minimized end-effector inertia eliminates oversho
 <img width="1149" height="753" alt="Screenshot 2026-08-16 194044" src="https://github.com/user-attachments/assets/6aa293fe-6b4e-48b9-8187-138a53bde880" />
 
 
-⚡ 2. Actuation & Precision Motion
+# ⚡ 2. Actuation & Precision Motion
+
+<img width="216" height="233" alt="neam 23" src="https://github.com/user-attachments/assets/0071b798-f1b8-4523-9f1f-f5b8b0620ea4" />
+
 High-Torque NEMA 23 Motors: Upgraded from standard NEMA 17 to NEMA 23 stepper motors, delivering significantly higher holding torque and dynamic payload capacity.
 
 Zero-Backlash Drive Mechanism: Precision transmission design completely eliminates mechanical backlash, ensuring accurate micro-positioning and zero slop on directional reversals.
 
 Enhanced Acceleration Profiles: High torque-to-inertia ratio allows aggressive acceleration and deceleration curves without missed steps.
 
-🧠 3. Compute & Control Architecture
+# 🧠 3. Compute & Control Architecture
+
+<img width="725" height="724" alt="Screenshot 2026-08-16 154953" src="https://github.com/user-attachments/assets/7cfeecb9-9bdf-4f3e-a0f1-dfc6bf7380d9" />
+
 Distributed Hybrid Processing:
 
 Raspberry Pi Coprocessor: Handles high-level computer vision pipelines (OpenCV), motion planning, coordinate mapping, and network/GUI interfaces.
@@ -59,7 +65,11 @@ Dedicated 32-Bit Motion Controller: Manages real-time trigonometric kinematics c
 
 Deterministic Low-Latency Communication: Fast UART/Serial bridge between Raspberry Pi and the 32-bit controller ensures seamless G-code and trajectory execution.
 
-👁️ 4. Dynamic Vision SystemAdjustable-Angle Camera Mount: Hardware-integrated camera bracket with variable tilt angle to accommodate top-down workspace inspection, oblique conveyor tracking, or tilted bin picking.Real-Time Object Detection & Sorting: Directly streams low-latency video to the onboard Raspberry Pi for color detection, contour extraction, bounding box estimation, and orientation detection.Adaptive Coordinate Calibration: Software-calibrated coordinate transformation mapping visual pixel coordinates directly into the Delta robot's Cartesian ($X, Y, Z$) coordinate frame
+#👁️ 4. Dynamic Vision SystemAdjustable-Angle Camera Mount:
+
+<img width="353" height="566" alt="raspberry pi camera" src="https://github.com/user-attachments/assets/bac96527-3eff-49b3-81f5-302a0740506c" />
+
+Hardware-integrated camera bracket with variable tilt angle to accommodate top-down workspace inspection, oblique conveyor tracking, or tilted bin picking.Real-Time Object Detection & Sorting: Directly streams low-latency video to the onboard Raspberry Pi for color detection, contour extraction, bounding box estimation, and orientation detection.Adaptive Coordinate Calibration: Software-calibrated coordinate transformation mapping visual pixel coordinates directly into the Delta robot's Cartesian ($X, Y, Z$) coordinate frame
 
 
 📐 5. Kinematics & Compatibility
