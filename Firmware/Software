@@ -1,1 +1,6475 @@
 
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+// Storage.h
+
+#ifndef _STORAGE_h
+#define _STORAGE_h
+
+#if defined(ARDUINO) && ARDUINO >= 100
+	#include "arduino.h"
+#else
+	#include "WProgram.h"
+#endif
+
+#include "config.h"
+#include "EEPROM.h"
+#include "Constants.h"
+
+#define VELICITY_ADDRESS 0
+#define ACCELERATION_ADDRESS 4
+
+#define RD_F_ADDRESS 8
+#define RD_E_ADDRESS 12
+
+#define RD_RF_ADDRESS 16
+#define RD_RE_ADDRESS 20
+
+#define RD_W_ADDRESS 24
+#define RD_U_ADDRESS 28
+#define RD_V_ADDRESS 32
+
+#define MOVE_AREA_X_ADDRESS 36
+#define MOVE_AREA_Y_ADDRESS 40
+#define MOVE_AREA_Z_ADDRESS 44
+
+#define MOVE_AREA_LARGEST_DIAMETER_ADDRESS 48
+
+#define MOVING_HOME_SPEED_ADDRESS 52
+
+#define BEGIN_END_VELOCITY_ADDRESS 56
+
+#define ENTRY_VELOCITY_ADDRESS 64
+#define EXIT_VELOCITY_ADDRESS 68
+
+#define MM_PER_LINEAR_SEGMENT_ADDRESS 72
+#define MM_PER_ARC_SEGMENT_ADDRESS 76
+
+class StorageClass
+{
+ protected:
+
+ public:
+	void init();
+	void StorageSettings();
+	void LoadSettings();
+	void RestoreSettings();
+ private:
+};
+
+extern StorageClass Storage;
+
+#endif
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "Temperature.h"
+
+void TemperatureClass::init()
+{
+	pinMode(THERMISTOR_PIN, INPUT);
+	pinMode(HEATER_PIN, OUTPUT);
+	analogWrite(HEATER_PIN, 0);
+}
+
+void TemperatureClass::GetTemperature()
+{
+	int raw = 0;
+	for (int j = 1; j <= OVERSAMPLENR; j++)
+	{
+		raw += analogRead(THERMISTOR_PIN);
+	}
+	float celsius = 0;
+	uint8_t i;
+	short(*tt)[][2] = (short(*)[][2])(temptable_60);
+	for (i = 1; i < 72; i++)
+	{
+		if (PGM_RD_W((*tt)[i][0]) > raw)
+		{
+			celsius = PGM_RD_W((*tt)[i - 1][1]) +
+				(raw - PGM_RD_W((*tt)[i - 1][0])) *
+				(float)(PGM_RD_W((*tt)[i][1]) - PGM_RD_W((*tt)[i - 1][1])) /
+				(float)(PGM_RD_W((*tt)[i][0]) - PGM_RD_W((*tt)[i - 1][0]));
+			break;
+		}
+	}
+
+	// Overflow: Set to last value in the table
+	if (i == 72) { celsius = PGM_RD_W((*tt)[i - 1][1]); }
+
+	CurrentTemperature = celsius;
+	
+}
+
+void TemperatureClass::SetHotendTemperature(float temperature)
+{
+	if (Data.End_Effector != USE_PRINTER)
+		return;
+
+	DesiredTemperature = temperature;
+	if (DesiredTemperature == 0)
+	{
+		Cooldown();
+		
+	}
+	else
+	{
+		LastTimeInt = millis();
+	}
+}
+
+bool TemperatureClass::WaitForHotendTemperature()
+{
+	if (DesiredTemperature == 0)
+	{
+		return true;
+	}
+
+	if (CurrentTemperature < (DesiredTemperature - TEMP_HYSTERESIS) || CurrentTemperature > (DesiredTemperature + TEMP_HYSTERESIS))
+	{
+		LastTime = millis();
+	}
+
+	if (millis() - LastTime > (TEMP_RESIDENCY_TIME * 1000))
+	{
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+
+void TemperatureClass::Cooldown()
+{
+	analogWrite(HEATER_PIN, 0);
+}
+
+void TemperatureClass::ISR_EXECUTE()
+{
+	if (Data.End_Effector != USE_PRINTER || DesiredTemperature == 0)
+	{
+		//Cooldown();
+		//ExecuteTempTimer.pause();
+		return;
+	}
+
+	if (millis() - LastTimeInt < INTERRUPT_CYCLE_TEMP)
+	{
+		return;
+	}
+	LastTimeInt = millis();
+
+	GetTemperature();
+
+	float error = DesiredTemperature - CurrentTemperature;
+	if (error < 0)
+	{
+		analogWrite(HEATER_PIN, 0);
+		return;
+	}
+
+	float dError = error - LastError;
+	LastError = error;
+
+	float P = error * DEFAULT_KP;
+	I += error * DEFAULT_KI * ((float)INTERRUPT_CYCLE_TIMER4 / 1000);
+	float D = (dError * DEFAULT_KD) / ((float)INTERRUPT_CYCLE_TIMER4 / 1000);
+
+	float pwmValue = P + I + D;
+
+	pwmValue = constrain(pwmValue, 0, 255);
+
+	analogWrite(HEATER_PIN, pwmValue);
+}
+
+TemperatureClass Temperature;
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+// Temperature.h
+
+#ifndef _TEMPERATURE_h
+#define _TEMPERATURE_h
+
+#if defined(ARDUINO) && ARDUINO >= 100
+	#include "arduino.h"
+#else
+	#include "WProgram.h"
+#endif
+
+#include <avr/interrupt.h>
+#include "config.h"
+#include "pin.h"
+
+#include "Constants.h"
+
+#define OVERSAMPLENR 16
+#define OV(N) int16_t((N)*(OVERSAMPLENR))
+
+const short temptable_60[][2] PROGMEM = {
+  { OV(  51), 272 },
+  { OV(  61), 258 },
+  { OV(  71), 247 },
+  { OV(  81), 237 },
+  { OV(  91), 229 },
+  { OV( 101), 221 },
+  { OV( 131), 204 },
+  { OV( 161), 190 },
+  { OV( 191), 179 },
+  { OV( 231), 167 },
+  { OV( 271), 157 },
+  { OV( 311), 148 },
+  { OV( 351), 140 },
+  { OV( 381), 135 },
+  { OV( 411), 130 },
+  { OV( 441), 125 },
+  { OV( 451), 123 },
+  { OV( 461), 122 },
+  { OV( 471), 120 },
+  { OV( 481), 119 },
+  { OV( 491), 117 },
+  { OV( 501), 116 },
+  { OV( 511), 114 },
+  { OV( 521), 113 },
+  { OV( 531), 111 },
+  { OV( 541), 110 },
+  { OV( 551), 108 },
+  { OV( 561), 107 },
+  { OV( 571), 105 },
+  { OV( 581), 104 },
+  { OV( 591), 102 },
+  { OV( 601), 101 },
+  { OV( 611), 100 },
+  { OV( 621),  98 },
+  { OV( 631),  97 },
+  { OV( 641),  95 },
+  { OV( 651),  94 },
+  { OV( 661),  92 },
+  { OV( 671),  91 },
+  { OV( 681),  90 },
+  { OV( 691),  88 },
+  { OV( 701),  87 },
+  { OV( 711),  85 },
+  { OV( 721),  84 },
+  { OV( 731),  82 },
+  { OV( 741),  81 },
+  { OV( 751),  79 },
+  { OV( 761),  77 },
+  { OV( 771),  76 },
+  { OV( 781),  74 },
+  { OV( 791),  72 },
+  { OV( 801),  71 },
+  { OV( 811),  69 },
+  { OV( 821),  67 },
+  { OV( 831),  65 },
+  { OV( 841),  63 },
+  { OV( 851),  62 },
+  { OV( 861),  60 },
+  { OV( 871),  57 },
+  { OV( 881),  55 },
+  { OV( 891),  53 },
+  { OV( 901),  51 },
+  { OV( 911),  48 },
+  { OV( 921),  45 },
+  { OV( 931),  42 },
+  { OV( 941),  39 },
+  { OV( 951),  36 },
+  { OV( 961),  32 },
+  { OV( 981),  23 },
+  { OV( 991),  17 },
+  { OV(1001),   9 },
+  { OV(1008),   0 }
+};
+
+#define TurnOnTimer4 (TIMSK4 |= (1 << OCIE4A))
+#define TurnOffTimer4 (TIMSK4 &= ~(1 << OCIE4A))
+#define COMPARE_VALUE_TIMER4 OCR4A
+
+#define INTERRUPT_CYCLE_TIMER4	30	//ms
+
+#define DEFAULT_KP 22.2
+#define DEFAULT_KI 0.2
+#define DEFAULT_KD 65
+
+#define TEMP_RESIDENCY_TIME 2  // (seconds)
+#define TEMP_HYSTERESIS 10       // (degC) range of +/- temperatures considered "close" to the target one
+
+#define PGM_RD_W(x)   (short)pgm_read_word(&x)
+
+#define INTERRUPT_CYCLE_TEMP 30
+
+class TemperatureClass
+{
+ protected:
+ 
+
+ public:
+	void init();
+	void SetHotendTemperature(float temperature);
+	bool WaitForHotendTemperature();
+	void Cooldown();
+	void GetTemperature();
+
+	void ISR_EXECUTE();
+	bool IsWait;
+
+	float CurrentTemperature;
+private:
+	float DesiredTemperature;
+
+	uint32_t LastTimeInt;
+	float I;
+	float LastError;
+	uint32_t LastTime;
+};
+
+extern TemperatureClass Temperature;
+
+#endif
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "Tool.h"
+
+void ToolClass::init()
+{
+}
+
+Point ToolClass::ConvertToPoint(float xPos, float yPos, float zPos)
+{
+	if (Data.IsMoveWithTheAbsoluteCoordinates == false)
+	{
+		xPos = xPos + Data.CurrentPoint.X;
+		yPos = yPos + Data.CurrentPoint.Y;
+		zPos = zPos + Data.CurrentPoint.Z;
+	}
+	else
+	{
+		if (Data.ZOffset < 0 && zPos != Data.CurrentPoint.Z)
+		{
+			zPos = zPos + Data.ZOffset;
+		}
+	}
+
+	Point pointBuffer;
+	pointBuffer.X = xPos;
+	pointBuffer.Y = yPos;
+	pointBuffer.Z = zPos;
+
+	return pointBuffer;
+}
+
+bool ToolClass::CheckingDesiredPoint(Point point)
+{
+	if (point.Z < Data.RD_W - Data.MOVING_AREA_Z)
+		return false;
+
+	if (sqrt(pow(point.X, 2) + pow(point.Y, 2)) > Data.MOVING_AREA_LARGEST_DIAMETER)
+		return false;
+
+	Data.DesiredPoint = point;
+
+	return true;
+}
+
+bool ToolClass::CheckingDesiredAngle(Angle angle)
+{
+	if (angle.Theta1 < THETA1_HOME_POSITION)
+		return false;
+	if (angle.Theta2 < THETA2_HOME_POSITION)
+		return false;
+	if (angle.Theta3 < THETA3_HOME_POSITION)
+		return false;
+	return true;
+}
+
+Point ToolClass::GetPointInLine(Point currentP, Point desiredP, float t)
+{
+	Point buffer;
+
+	buffer.X = currentP.X - ((currentP.X - desiredP.X) * t);
+	buffer.Y = currentP.Y - ((currentP.Y - desiredP.Y) * t);
+	buffer.Z = currentP.Z - ((currentP.Z - desiredP.Z) * t);
+
+	return buffer;
+}
+
+Point ToolClass::GetPointInCircle(float ox, float oy, float radius, float angle)
+{
+	Point buffer;
+	buffer.X = ox + radius * cosf(angle);
+	buffer.Y = oy + radius * sinf(angle);
+	buffer.Z = Data.CurrentPoint.Z;
+	return buffer;
+}
+
+bool ToolClass::CheckFuplicatione(Point point1, Point point2)
+{
+	float x_Offset = point1.X - point2.X;
+	float y_Offset = point1.Y - point2.Y;
+	float z_Offset = point1.Z - point2.Z;
+
+	if (x_Offset == 0 && y_Offset == 0 && z_Offset == 0)
+	{
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+
+float ToolClass::CalDistance2Point(Point point1, Point point2)
+{
+	float x_Offset = point1.X - point2.X;
+	float y_Offset = point1.Y - point2.Y;
+	float z_Offset = point1.Z - point2.Z;
+
+	float distance = sqrt(pow(x_Offset, 2) + pow(y_Offset, 2) + pow(z_Offset, 2));
+
+	if (distance < 0.2 && distance > -0.2)
+		distance = 0;
+
+	return distance;
+}
+
+bool ToolClass::Wait()
+{
+	if (Temperature.IsWait == true)
+	{
+		if (Temperature.WaitForHotendTemperature() == true)
+		{
+			Temperature.IsWait = false;
+			Data.IsExecutedGcode = true;
+			return true;
+		}
+		else
+		{
+			return false;
+		}
+	}
+	else
+	{
+		if (millis() - LastTime < TimeDelay)
+		{
+			return false;
+		}
+		else
+		{
+			Data.IsExecutedGcode = true;
+			return true;
+		}
+	}
+}
+
+void ToolClass::SetTimeDelay(float timeDelay)
+{
+	TimeDelay = timeDelay;
+	LastTime = millis();
+	IsWait = true;
+}
+
+ToolClass Tool;
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+// Tool.h
+
+#ifndef _TOOL_h
+#define _TOOL_h
+
+#if defined(ARDUINO) && ARDUINO >= 100
+	#include "arduino.h"
+#else
+	#include "WProgram.h"
+#endif
+
+#include "Constants.h"
+#include "Temperature.h"
+
+class ToolClass
+{
+ protected:
+
+ public:
+	void init();
+	Point ConvertToPoint(float xPos, float yPos, float zPos);
+	bool CheckingDesiredPoint(Point point);
+	bool CheckingDesiredAngle(Angle angle);
+	Point GetPointInLine(Point currentP, Point desiredP, float t);
+	Point GetPointInCircle(float ox, float oy, float desiredP, float angle);
+	bool CheckFuplicatione(Point point1, Point point2);
+	float CalDistance2Point(Point point1, Point point2);
+
+	bool Wait();
+	void SetTimeDelay(float timeDelay);
+	bool IsWait;
+
+private:
+	uint32_t TimeDelay;
+	uint32_t LastTime;
+};
+
+extern ToolClass Tool;
+
+#endif
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "WifiSettings.h"
+
+void WifiSettingsClass::init()
+{
+
+
+}
+
+void WifiSettingsClass::Save()
+{
+	char ssidWifi[32] = "";
+	char pswdWifi[32] = "";
+	SSIDWifi.toCharArray(ssidWifi, 32);
+	PSWDWifi.toCharArray(pswdWifi, 32);
+
+	EEPROM.put(133, ssidWifi);
+	EEPROM.put(167, pswdWifi);
+
+	delay(1);
+}
+
+void WifiSettingsClass::SaveIP()
+{
+	char ipWifi[32] = "";
+	IPWifi.toCharArray(ipWifi, 32);
+	EEPROM.put(100, ipWifi);
+	delay(1);
+}
+
+void WifiSettingsClass::IP()
+{
+	char ipWifi[32] = "";
+	EEPROM.get(100, ipWifi);
+	delay(1);
+	SERIAL_PORT.println(ipWifi);
+}
+
+void WifiSettingsClass::GetSsid()
+{
+	char ssidWifi[32] = "";
+	EEPROM.get(133, ssidWifi);
+
+	SERIAL_PORT.println("SSID:" + SSIDWifi);
+}
+
+void WifiSettingsClass::GetPswd()
+{
+	char pswdWifi[32] = "";
+	EEPROM.get(167, pswdWifi);
+
+	SERIAL_PORT.println("PSWD:" + PSWDWifi);
+}
+
+WifiSettingsClass WifiSettings;
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+// WifiSettings.h
+
+#ifndef _WIFISETTINGS_h
+#define _WIFISETTINGS_h
+
+#if defined(ARDUINO) && ARDUINO >= 100
+	#include "arduino.h"
+#else
+	#include "WProgram.h"
+#endif
+
+#include <EEPROM.h>
+#include "config.h"
+
+class WifiSettingsClass
+{
+ protected:
+
+
+ public:
+	void init();
+	void Save();
+	void SaveIP();
+	void IP();
+	void GetSsid();
+	void GetPswd();
+
+	String SSIDWifi;
+	String PSWDWifi;
+	String IPWifi;
+};
+
+extern WifiSettingsClass WifiSettings;
+
+#endif
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#pragma once
+
+#define BOARD_RAMPS_14
+
+//Delta Model Use
+#define DELTA_X_PULY_S
+//#define DELTA_X_V2
+
+#define SERIAL_PORT Serial
+#define BAUDRATE 115200
+
+#define DELTA_AXIS_4
+#ifdef DELTA_AXIS_4
+
+#ifndef NUMBER_DEGREES_OF_FREEDOM
+ #define NUMBER_DEGREES_OF_FREEDOM 4
+#endif
+
+#define USING_SERVO_FOR_AXIS4
+#ifdef USING_SERVO_FOR_AXIS4
+ #define AXIS_4_HOME_POSITION 0
+ #define AXIS_4_MAX_POSITION	170
+ #define AXIS_4_DEG_PER_SECONDS	300		//for RC Servo 9G
+ //#define AXIS_4_DEG_PER_SECONDS	300 //for RC Servo MG996
+#endif // USING_SERVO_FOR_AXIS4
+
+#endif // DELTA_AXIS_4
+
+#ifndef NUMBER_DEGREES_OF_FREEDOM
+ #define NUMBER_DEGREES_OF_FREEDOM 3
+#endif
+
+
+#define VACUUM
+#ifdef VACUUM
+ #define TIME_DELAY_TO_DROP	400 //ms
+#endif // VACUUM
+
+
+#define CLIP
+#ifdef CLIP
+ #define CLIP_OPEN_ANGLE_SERVO 110
+ #define CLIP_CLOSE_ANGLE_SERVO 55
+ #define CLIP_DEG_PER_SECONDS	400 //for RC Servo 9G
+#endif // CLIP
+
+//Adaptive Multi - Axis Step - Smoothing(AMASS)
+#define SMOOTHSTEP 0
+
+//Bresenham line drawing algorithm
+#define MM_PER_LINEAR_SEGMENT	12			//mm
+#define MM_PER_ARC_SEGMENT	8			//mm
+#define NUMBER_PER_BEZIER_SEGMENT 30	//segment
+
+#define DEFAULT_ACCELERATION 2000.0				//mm^2/s
+#define DEFAULT_VELOCITY 300.0					//mm/s
+
+#define DEFAULT_MAX_VELOCITY 850.0			//mm/s
+#define DEFAULT_MAX_ACCELERATION 30000.0			//mm/s
+
+#define INTERRUPT_CYCLE_MIN	170.0f  //165
+
+#define DEFAULT_BEGIN_VELOCITY 12			//mm/s 
+#define DEFAULT_END_VELOCITY 12		//mm/s
+
+#define DEFAULT_ENTRY_VELOCITY 12			//mm/s
+#define DEFAULT_EXIT_VELOCITY 12			//mm/s
+
+#define DEFAULT_MOVING_HOME_SPEED 50			//deg/s
+
+#define THETA1_MAX_POSITION	90					//deg
+#define THETA2_MAX_POSITION	90
+#define THETA3_MAX_POSITION	90
+
+#define REVERSE_DIRECTION
+
+#define THETA1_ENDSTOP_INVERT false
+#define THETA2_ENDSTOP_INVERT false
+#define THETA3_ENDSTOP_INVERT false
+
+#ifdef ENDSTOP_FOR_CHECK_Z_AREA
+#define ENDSTOP_FOR_CHECK_Z_AREA_INVERT fasle
+#endif
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "ConnectionState.h"
+
+void ConnectionStateClass::Init()
+{
+	pinMode(LED_G_PIN, OUTPUT);
+	pinMode(LED_R_PIN, OUTPUT);
+	pinMode(LED_B_PIN, OUTPUT);
+
+	WRITE(LED_G_PIN, 1);
+	WRITE(LED_R_PIN, 1);
+	WRITE(LED_B_PIN, 1);
+
+	LastTimeBlink = millis();
+	LastTimeDisconnect = millis();
+
+	SetColor(RED);
+	SetBlink(100);
+}
+
+void ConnectionStateClass::SetColor(COLOR color)
+{
+	Color = color;
+	WRITE(LED_G_PIN, 1);
+	WRITE(LED_R_PIN, 1);
+	WRITE(LED_B_PIN, 1);
+}
+
+void ConnectionStateClass::SetBlink(uint16_t ms)
+{
+	TimeBlink = ms;
+	if (TimeBlink == 0)
+	{
+		switch (Color)
+		{
+		case RED:
+			WRITE(LED_R_PIN, 0);
+			break;
+		case GREEN:
+			WRITE(LED_G_PIN, 0);
+			break;
+		case BLUE:
+			WRITE(LED_B_PIN, 0);
+			break;
+		default:
+			break;
+		}
+	}
+}
+
+void ConnectionStateClass::Execute()
+{
+	if (millis() - LastTimeBlink < TimeBlink || TimeBlink == 0)
+	{
+		return;
+	}
+
+	if (millis() - LastTimeDisconnect > TIME_DISCONNECT)
+	{
+		Disconnect();
+		LastTimeDisconnect = millis();
+	}
+
+	LastTimeBlink = millis();
+
+	switch (Color)
+	{
+	case RED:
+		WRITE(LED_R_PIN, !READ(LED_R_PIN));
+		break;
+	case GREEN:
+		WRITE(LED_G_PIN, !READ(LED_G_PIN));
+		break;
+	case BLUE:
+		WRITE(LED_B_PIN, !READ(LED_B_PIN));
+		break;
+	default:
+		break;
+	}
+}
+
+void ConnectionStateClass::ResetTimeDisconnect()
+{
+	LastTimeDisconnect = millis();
+}
+
+void ConnectionStateClass::Connect()
+{
+	SERIAL_PORT.println("YesDelta");
+	LastTimeDisconnect = millis();
+	SetColor(BLUE);
+	SetBlink(1000);
+}
+
+void ConnectionStateClass::Disconnect()
+{
+	SetColor(RED);
+	SetBlink(100);
+}
+
+ConnectionStateClass ConnectionState;
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+// LedConnect.h
+
+#ifndef _CONNECTIONSTATE_h
+#define _CONNECTIONSTATE_h
+
+#if defined(ARDUINO) && ARDUINO >= 100
+	#include "arduino.h"
+#else
+	#include "WProgram.h"
+#endif
+
+#include "config.h"
+#include "enum.h"
+
+#include "pin.h"
+#include "fastio.h"
+
+#define TIME_DISCONNECT 60000
+
+class ConnectionStateClass
+{
+ protected:
+
+private:
+
+	uint32_t LastTimeBlink;
+	uint32_t LastTimeDisconnect;
+	uint16_t TimeBlink;
+	COLOR Color;
+	void SetColor(COLOR color);
+	void SetBlink(uint16_t ms);
+
+ public:
+	void Init();
+	void Connect();
+	void Disconnect();
+	void Execute();
+	void ResetTimeDisconnect();
+
+};
+
+extern ConnectionStateClass ConnectionState;
+
+#endif
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "Constants.h"
+
+void Constants::init()
+{
+	RD_F = (float)DEFAULT_RD_F;
+	RD_E = (float)DEFAULT_RD_E;
+	RD_RF = (float)DEFAULT_RD_RF;
+	RD_RE = (float)DEFAULT_RD_RE;
+
+	RD_W = (float)DEFAULT_RD_W;
+	RD_U = (float)DEFAULT_RD_U;
+	RD_V = (float)DEFAULT_RD_V;
+
+	MOVING_AREA_X = (float)DEFAULT_MOVING_AREA_X;
+	MOVING_AREA_Y = (float)DEFAULT_MOVING_AREA_Y;
+	MOVING_AREA_Z = (float)DEFAULT_MOVING_AREA_Z;
+
+	MOVING_AREA_LARGEST_DIAMETER = (float)DEFAULT_MOVING_AREA_LARGEST_DIAMETER;
+
+	Velocity = (float)DEFAULT_VELOCITY;			//mm/s
+	Acceleration = (float)DEFAULT_ACCELERATION;
+	
+	MovingHomeSpeed = (float)DEFAULT_MOVING_HOME_SPEED;
+
+	BeginEndVelocity = (float)DEFAULT_BEGIN_VELOCITY;
+
+	EntryVelocity = (float)DEFAULT_ENTRY_VELOCITY;
+	ExitVelocity = (float)DEFAULT_EXIT_VELOCITY;
+
+	IsMoveWithTheAbsoluteCoordinates = true;
+	IsExecutedGcode = false;
+
+	End_Effector = USE_VACUUM;
+
+	MMPerLinearSegment = (float)MM_PER_LINEAR_SEGMENT;
+
+	MMPerArcSegment = (float)MM_PER_ARC_SEGMENT;
+}
+
+void Constants::ResetData()
+{
+	init();
+}
+
+
+Constants Data;
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+// Constants.h
+
+#ifndef _CONSTANTS_h
+#define _CONSTANTS_h
+
+#include "config.h"
+#include "enum.h"
+#include "Geometry.h"
+
+typedef struct
+{
+	float X;
+	float Y;
+	float Z;
+}Point;
+
+typedef struct
+{
+	float Theta1;
+	float Theta2;
+	float Theta3;
+}Angle;
+
+class Constants
+{
+public:
+	void	init();
+	void ResetData();
+
+	//
+
+	float	RD_F;
+	float	RD_E;
+	float	RD_RF;
+	float	RD_RE;
+
+	float	RD_W;
+	float	RD_U;
+	float	RD_V;
+
+	float	MOVING_AREA_X;
+	float	MOVING_AREA_Y;
+	float	MOVING_AREA_Z;
+
+	float	MOVING_AREA_LARGEST_DIAMETER;
+	//
+
+	float	Velocity;			//mm/s
+	float	Acceleration;		//mm/s^2
+
+	float MovingHomeSpeed;
+
+	float BeginEndVelocity;
+
+	float EntryVelocity;
+	float ExitVelocity;
+
+	bool IsMoveWithTheAbsoluteCoordinates;
+
+	bool IsExecutedGcode;
+
+	END_EFFECTOR End_Effector;
+
+	float MMPerLinearSegment;
+	float MMPerArcSegment;
+
+	Point CurrentPoint;
+	Point DesiredPoint;
+	Point HomePosition;
+
+	Angle CurrentAngle;
+
+	float ZOffset;
+
+	float ExtrustionPosition;
+
+	int WPosition;
+private:
+
+};
+
+extern Constants Data;
+
+#endif
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "Control.h"
+
+void ControlClass::init()
+{
+
+
+}
+
+void ControlClass::G90()
+{
+	Data.IsMoveWithTheAbsoluteCoordinates = true;
+
+	Data.IsExecutedGcode = true;
+}
+
+void ControlClass::G91()
+{
+	Data.IsMoveWithTheAbsoluteCoordinates = false;
+
+	Data.IsExecutedGcode = true;
+}
+
+void ControlClass::G93()
+{
+	Serial.print(Data.CurrentPoint.X);
+	Serial.print(",");
+	Serial.print(Data.CurrentPoint.Y);
+	Serial.print(",");
+	Serial.println(Data.CurrentPoint.Z);
+}
+
+void ControlClass::M03(float s)
+{
+	
+	EndEffector.TurnOnEndEffector((byte)s, 0);
+	
+	Data.IsExecutedGcode = true;
+}
+
+void ControlClass::M04(float s)
+{
+	EndEffector.TurnOnEndEffector((byte)s, 1);
+	
+	Data.IsExecutedGcode = true;
+}
+
+void ControlClass::M05()
+{
+	EndEffector.TurnOffEndEffector();
+
+	Data.IsExecutedGcode = true;
+}
+
+void ControlClass::M84()
+{
+	Stepper.DisanableStepper();
+
+	Data.IsExecutedGcode = true;
+}
+
+void ControlClass::M104(float s)
+{
+	Temperature.SetHotendTemperature(s);
+
+	Data.IsExecutedGcode = true;
+}
+
+void ControlClass::M105()
+{
+	Temperature.GetTemperature();
+	SERIAL_PORT.print("T:");
+	SERIAL_PORT.println(Temperature.CurrentTemperature);
+	Data.IsExecutedGcode = true;
+}
+
+void ControlClass::M109()
+{
+	Temperature.IsWait = true;
+	Tool.IsWait = true;
+}
+
+void ControlClass::M203(float s)
+{
+	Planner.SetMaxVelocity(s);
+	Data.IsExecutedGcode = true;
+}
+
+void ControlClass::M204(float a)
+{
+	Planner.SetAcceleration(a);
+	Data.IsExecutedGcode = true;
+}
+
+void ControlClass::M206(float zPos)
+{
+	if (zPos == 0)
+	{
+		Data.ZOffset = zPos;
+		Data.IsExecutedGcode = true;
+	}
+	if (zPos < Data.HomePosition.Z)
+	{
+		Data.ZOffset = zPos;
+		Data.IsExecutedGcode = true;
+	}
+}
+
+void ControlClass::M360(float e)
+{
+	Data.End_Effector = (END_EFFECTOR)e;
+	EndEffector.ResetEndEffectorOutput();
+	Data.IsExecutedGcode = true;
+}
+
+void ControlClass::M361(float p)
+{
+	Data.MMPerLinearSegment = p;
+	Data.IsExecutedGcode = true;
+}
+
+void ControlClass::M362(float p)
+{
+
+	Data.MMPerArcSegment = p;
+	Data.IsExecutedGcode = true;
+}
+
+void ControlClass::M500()
+{
+	Storage.StorageSettings();
+
+	Data.IsExecutedGcode = true;
+}
+
+void ControlClass::M501()
+{
+	Storage.RestoreSettings();
+
+	Data.IsExecutedGcode = true;
+}
+
+void ControlClass::M502()
+{
+	Storage.LoadSettings();
+
+	Data.IsExecutedGcode = true;
+}
+
+ControlClass Control;
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+// Control.h
+
+#ifndef _CONTROL_h
+#define _CONTROL_h
+
+#if defined(ARDUINO) && ARDUINO >= 100
+	#include "arduino.h"
+#else
+	#include "WProgram.h"
+#endif
+
+#include "Constants.h"
+#include "Storage.h"
+#include "EndEffector.h"
+#include "Planner.h"
+#include "Temperature.h"
+#include "Stepper.h"
+#include "GCodeReceiver.h"
+#include "Tool.h"
+
+class ControlClass
+{
+ protected:
+
+
+ public:
+	void init();
+	void G90();//Absolute Positioning
+	void G91();//Relative Positioning
+	void G93();//Get Position
+
+	void M03(float s);//Set spindle cw or lazer on
+	void M04(float s);//Set spindle ccw or lazer on
+	void M05();//Set spindle off or lazer off
+
+	void M84();//Disanable Step
+
+	void M104(float s); //Set Hotend Temperature
+	void M105();
+	void M109();//Wait for Hotend Temperature
+
+	void M203(float s);//Set Max Feedrate
+	void M204(float a);//Set acceleration
+	void M206(float zPos);//Set Offset
+
+	void M360(float e);//set end effector
+	void M361(float p);//Set mm per linear segment
+	void M362(float p);//Set mm per arc segment
+
+	void M500();//Storage Settings
+	void M501();//Restore Settings
+	void M502();//Load Settings
+};
+
+extern ControlClass Control;
+
+#endif
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "config.h"
+#include "Constants.h"
+
+#include "fastio.h"
+
+#include "Storage.h"
+#include <ArduinoSTL.h>
+#include <vector>
+#include "GCodeReceiver.h"
+#include "GCodeExecute.h"
+#include "Planner.h"
+#include "Motion.h"
+#include "Tool.h"
+#include "EndStops.h"
+#include "EndEffector.h"
+#include "MultiServo.h"
+#include "Temperature.h"
+#include "ConnectionState.h"
+
+using namespace std;
+
+GCodeReceiverClass GcodeReceiver;
+GCodeExecuteClass GcodeExecute;
+
+vector<String> GCodeQueue;
+vector<Segment> SegmentQueue;
+
+void setup() {
+	SERIAL_PORT.begin(BAUDRATE);
+	Data.init();
+	Storage.init();
+
+	DeltaKinematics.init();
+	EndEffector.init();
+	EndStops.init();
+	Planner.init(&SegmentQueue);
+	Stepper.init(&SegmentQueue);
+	MultiServo.init();
+	ConnectionState.Init();
+	Motion.init();
+	Temperature.init();
+
+	GcodeReceiver.Init(&GCodeQueue, &SERIAL_PORT, BAUDRATE);
+	GcodeExecute.Init(&GCodeQueue);
+
+	Serial.println("Init Success!");
+	Motion.G28();
+}
+
+void loop() {
+	GcodeReceiver.Execute();
+	GcodeExecute.Run();
+	ConnectionState.Execute();
+	Temperature.ISR_EXECUTE();
+}
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * 
+ =============================================================================================================
+Greetings! Thank you for choosing DeltaXFirmware as your delta robot firmware.
+
+To configure DeltaX you must edit Config.h and Geometry.h
+located in the root 'Delta_Firmware' folder.
+
+==============================================================================================================
+Delta X Gcode
+
+-G0, G1 – Linear Move
+
+Description: The G0 and G1 commands add a linear move to the queue to be performed after all previous moves are completed.
+A command like G1 F1000 sets the feedrate for all subsequent moves.
+Usage: G0 [F<rate>] [X<pos>] [Y<pos>] [Z<pos>] [W<ang>]
+Parameters:
+[F<rate>]    The maximum movement rate of the move between the start and end point. The feedrate set here applies to subsequent moves that omit this parameter.
+[X<pos>]   A coordinate on the X axis.
+[Y<pos>]   A coordinate on the Y axis.
+[Z<pos>]   A coordinate on the Z axis.
+[W<ang>]   A coordinate on the W axis.
+Examples:
+G0 X12   ; move to 12mm on the X axis 
+G0 F1500 ; set the feedrate to 1500mm/minute 
+G1 X90.6 Y13.8 ; move to 90.6mm on the X axis and 13.8mm on the Y axis 
+--------------------------------------------------------------------------------
+
+-G2, G3 – Controlled Arc Move
+
+Description: G2 adds a clockwise arc move to the planner; G3 adds a counter-clockwise arc. An arc move starts at the current position and ends at the given XYZ, pivoting around a center-point offset given by I and J.
+Usage: G2 [F<rate>] I<offset> J<offset> [X<pos>] [Y<pos>] [W<ang>]
+Parameters:
+[F<rate>]    The maximum movement rate of the move between the start and end point. The feedrate set here applies to subsequent moves that omit this parameter.
+I<offset>   An offset from the current X position to use as the arc center.
+J<offset>   An offset from the current Y position to use as the arc center.
+[X<pos>]   A coordinate on the X axis.
+[Y<pos>]   A coordinate on the Y axis.
+[W<ang>]   A coordinate on the W axis.
+Examples:
+G2 I40 J0 X80 Y0
+--------------------------------------------------------------------------------
+
+-G4 – Dwell
+
+Description: Dwell pauses the command queue and waits for a period of time.
+Usage: G4 [P<time in ms>]. Other firmware version "time in s"
+Parameters:
+[P<time>]   Amount of time to dwell.
+Examples:
+G4 P500 ; delay 0.5s, or 500s
+--------------------------------------------------------------------------------
+
+-G5 – Bezier cubic spline
+
+Description: G5 creates a cubic B-spline in the XY plane with the X and Y axes only. P and Q parameters are required. I and J are required for the first G5 command in a series. For subsequent G5commands, either both I and J must be specified, or neither. If I and J are unspecified, the starting direction of the cubic will automatically match the ending direction of the previous cubic (as if I and J are the negation of the previous P and Q).
+Usage: G5 [F<rate>] I<pos> J<pos> P<pos> Q<pos> X<pos> Y<pos>  [W<ang>]
+Parameters:
+[F<rate>]    The maximum movement rate of the move between the start and end point. The feedrate set here applies to subsequent moves that omit this parameter.
+[I<pos>]   X incremental offset from start point to first control point.
+[J<pos>]   Y incremental offset from start point to first control point.
+[P<pos>]  X incremental offset from end point to second control point.
+[Q<pos>]   Y incremental offset from end point to second control point.
+[X<pos>]   A coordinate on the Y axis.
+[Y<pos>]   A coordinate on the Y axis.
+[W<ang>]   A coordinate on the W axis.
+Examples:
+G5 F200 I-40 Y20 P-20 Y-20 X20 Y-20.
+--------------------------------------------------------------------------------
+
+-G6 – Controlled Angle
+
+Description: Directly control movement angle without endpoint coordinates..
+Usage: G6 [F<rate>] X<pos> Y<pos> Z<pos> P<pos>
+Parameters:
+[F<rate>]    The maximum movement rate of the move between the start and end point. The feedrate set here applies to subsequent moves that omit this parameter.
+[X<pos>]   The value of the angle theta 1.
+[Y<pos>]   The value of the angle theta 2.
+[Z<pos>]   The value of the angle theta 3.
+[P<pos>]   Distance traveled.
+Examples:
+G4 P500 ; delay 0.5s
+--------------------------------------------------------------------------------
+
+-G28 – Auto Home
+
+Description: Auto-home one or more axes, moving them towards their endstops until triggered.
+Usage: G28
+--------------------------------------------------------------------------------
+
+-G90 – Absolute Positioning
+
+Description: In absolute mode all coordinates given in G-code are interpreted as positions in the logical coordinate space.
+Usage: G90
+--------------------------------------------------------------------------------
+
+-G91 – Relative Positioning
+
+Description: Set relative position mode. In this mode all coordinates are interpreted as relative to the last position.
+Usage: G91
+--------------------------------------------------------------------------------
+
+-M3 – Spindle CW/ Laser On/ Set Gripper To Close/ Set Angle of Gripper
+
+Description: Wait for moves to complete, then set the spindle speed (clockwise), laser power, or angle of gripper.
+Usage: M3 [S<value>]
+Parameters:
+[S<value>] Spindle speed (0 - 255), laser power (0 - 255), angle of gripper (0-100), if value is emtpy then gripper close.
+--------------------------------------------------------------------------------
+
+-M4 – Spindle CCW/ Laser On/ Set Gripper To Close/ Set Angle of Gripper
+
+Description: Wait for moves to complete, then set the spindle speed (clockwise), laser power, or angle of gripper.
+Usage: M4 [S<value>]
+Parameters:
+[S<value>] Spindle speed (0 - 255), laser power (0 - 255), angle of gripper (0-100), if value is emtpy then gripper close.
+--------------------------------------------------------------------------------
+
+-M5 – Spindle / Laser Off/ Gripper Open
+
+Description: Wait for moves to complete, then turn off the spindle / laser power, PWM and set gripper to open.
+Usage: M5
+--------------------------------------------------------------------------------
+
+-M84 – Disable steppers
+
+Description: This command can be used to disable steppers.
+Usage: M84
+--------------------------------------------------------------------------------
+
+-M104 – Set Hotend Temperature
+
+Description: Set a new target hot end temperature and continue without waiting. The firmware will continue to try to reach and hold the temperature in the background.
+Usage: M104 [S<temp>]
+Parameters:
+[S<temp>] Target temperature.
+--------------------------------------------------------------------------------
+
+-M109 – Wait for Hotend Temperature
+
+Description: This command optionally sets a new target hot end temperature and waits for the target temperature to be reached before proceeding.
+Usage: M109 [S<temp>]
+Parameters:
+[S<temp>] Target temperature.
+--------------------------------------------------------------------------------
+
+-M203 – Set Max Feedrate
+
+Description: Set the max feedrate for one or more axes.
+Usage: M203 [S<units/s>]
+Parameters:
+[S<units/s>] Max feedrate.
+--------------------------------------------------------------------------------
+
+-M204 – Set Acceleration
+
+Description: Set the preferred acceleration for moves of different types.
+Usage: M204 [A<accel>]
+Parameters:
+[A<accel>] Travel acceleration.
+--------------------------------------------------------------------------------
+
+-M206 – Set Z Offsets
+
+Description: Use M206 to apply a persistent Z offset to the native home position and coordinate space. This effectively shifts the coordinate space in the negative direction. Used for 3d printing.
+Usage: M206 [Z<offset>]
+Parameters:
+[Z<offset>] Z offset.
+--------------------------------------------------------------------------------
+
+-M500 – Save Settings
+
+Description: Save all configurable settings to EEPROM.
+Usage: M500
+--------------------------------------------------------------------------------
+
+-M501 – Restore Settings
+
+Description: Load all saved settings from EEPROM.
+Usage: M501
+--------------------------------------------------------------------------------
+
+-M502 – Restore Settings
+
+Description: Reset all configurable settings to their factory defaults..
+Usage: M502
+--------------------------------------------------------------------------------
+
+-M360 – Set End effector
+
+Description: Select the end effector for delta robot.
+Usage: M360 [E<index>]
+Parameters:
+ index =
+0 : Vacuum.
+1 : Gripper.
+2 : Pen.
+3 : Laser.
+4 : Printer.
+5 : Custom.
+--------------------------------------------------------------------------------
+
+-M361 – Set mm per linear segment
+
+Description: Set segment length when interpolation.
+Usage: M361 [P<units>]
+Parameters:
+[P<units>] Segment length when linear interpolation.
+--------------------------------------------------------------------------------
+
+-M362 – Set mm per arc segment
+
+Description: Set segment length when interpolation.
+Usage: M361 [P<units>]
+Parameters:
+[P<units>] segment length when arc interpolation.
+
+
+ */
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "DeltaKinematics.h"
+
+void DeltaKinematicsClass::init()
+{
+	_y0_ = 0.5 * tan30 * Data.RD_E;
+	_y1_ = -0.5 * tan30 * Data.RD_F;
+	RD_RF_Pow2 = Data.RD_RF*Data.RD_RF;
+	RD_RE_Pow2 = Data.RD_RE*Data.RD_RE;
+}
+
+bool DeltaKinematicsClass::ForwardKinematicsCalculations(Angle angleposition, Point &point)
+{
+	float theta1 = DEG_TO_RAD * angleposition.Theta1;
+	float theta2 = DEG_TO_RAD * angleposition.Theta2;
+	float theta3 = DEG_TO_RAD * angleposition.Theta3;
+
+	float t = (Data.RD_F - Data.RD_E) * tan30 / 2.0;
+
+	float y1 = -(t + Data.RD_RF * cos(theta1));
+	float z1 = -Data.RD_RF * sin(theta1);
+
+	float y2 = (t + Data.RD_RF * cos(theta2))*sin30;
+	float x2 = y2 * tan60;
+	float z2 = -Data.RD_RF * sin(theta2);
+
+	float y3 = (t + Data.RD_RF * cos(theta3))*sin30;
+	float x3 = -y3 * tan60;
+	float z3 = -Data.RD_RF * sin(theta3);
+
+	float dnm = (y2 - y1)*x3 - (y3 - y1)*x2;
+
+	float w1 = y1 * y1 + z1 * z1;
+	float w2 = x2 * x2 + y2 * y2 + z2 * z2;
+	float w3 = x3 * x3 + y3 * y3 + z3 * z3;
+
+	// x = (a1*z + b1)/dnm
+	float a1 = (z2 - z1)*(y3 - y1) - (z3 - z1)*(y2 - y1);
+	float b1 = -((w2 - w1)*(y3 - y1) - (w3 - w1)*(y2 - y1)) / 2.0;
+
+	// y = (a2*z + b2)/dnm;
+	float a2 = -(z2 - z1)*x3 + (z3 - z1)*x2;
+	float b2 = ((w2 - w1)*x3 - (w3 - w1)*x2) / 2.0;
+
+	// a*z^2 + b*z + c = 0
+	float a = a1 * a1 + a2 * a2 + dnm * dnm;
+	float b = 2 * (a1*b1 + a2 * (b2 - y1 * dnm) - z1 * dnm*dnm);
+	float c = (b2 - y1 * dnm)*(b2 - y1 * dnm) + b1 * b1 + dnm * dnm*(z1*z1 - Data.RD_RE * Data.RD_RE);
+
+	// discriminant
+	float d = b * b - (float)4.0*a*c;
+	if (d < 0) return false;
+
+	point.Z = -(float)0.5*(b + sqrt(d)) / a;
+	point.X = (a1*point.Z + b1) / dnm;
+	point.Y = (a2*point.Z + b2) / dnm;
+
+	return true;
+}
+
+bool DeltaKinematicsClass::AngleThetaCalculations(float x0, float y0, float z0, float &theta)
+{
+	//float y1 = -0.5 * tan30 * Data.RD_F;
+	//y0 -= 0.5 * tan30 * Data.RD_E;
+	float y1 = _y1_;
+	y0 -= _y0_;
+
+	// z = a + b*y
+	//float a = (x0*x0 + y0 * y0 + z0 * z0 + Data.RD_RF*Data.RD_RF - Data.RD_RE*Data.RD_RE - y1 * y1) / (2.0*z0);
+	float a = (x0*x0 + y0 * y0 + z0 * z0 + RD_RF_Pow2 - RD_RE_Pow2 - y1 * y1) / (2.0*z0);
+	float b = (y1 - y0) / z0;
+
+	// discriminant
+	//float d = -(a + b * y1)*(a + b * y1) + Data.RD_RF* (b*b*Data.RD_RF + Data.RD_RF);
+	float d = -(a + b * y1)*(a + b * y1) + b*b*RD_RF_Pow2 + RD_RF_Pow2;
+
+	if (d < 0) return false;
+
+	float yj = (y1 - a * b - sqrt(d)) / (b*b + 1.0);
+	float zj = a + b * yj;
+
+	theta = atan(-zj / (y1 - yj)) * RAD_TO_DEG + ((yj > y1) ? 180.0 : 0.0);
+
+	return true;
+}
+
+bool DeltaKinematicsClass::InverseKinematicsCalculations(Point point, Angle &angleposition)
+{	
+	if (!AngleThetaCalculations(point.X, point.Y, point.Z, angleposition.Theta1))
+	{
+		return false;
+	}
+	if (!AngleThetaCalculations(point.X * cos120 + point.Y * sin120, point.Y * cos120 - point.X * sin120, point.Z, angleposition.Theta2))
+	{
+		return false;
+	}
+	if (!AngleThetaCalculations(point.X * cos120 - point.Y * sin120, point.Y * cos120 + point.X * sin120, point.Z, angleposition.Theta3))
+	{
+		return false;
+	}
+	return true;
+}
+
+DeltaKinematicsClass DeltaKinematics;
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+// DeltaKinematics.h
+
+#ifndef _DELTAKINEMATICS_h
+#define _DELTAKINEMATICS_h
+
+#if defined(ARDUINO) && ARDUINO >= 100
+	#include "arduino.h"
+#else
+	#include "WProgram.h"
+#endif
+
+#include "Constants.h"
+
+using namespace std;
+
+//trigonometric constants
+const double tan30 = 1 / sqrt(3);
+const double tan30x05 = 0.5 / sqrt(3);
+const double tan60 = sqrt(3);
+const double sin30 = 0.5;
+const double cos30 = sqrt(3) / 2;
+const double cos120 = -0.5;
+const double sin120 = sqrt(3) / 2;
+
+class DeltaKinematicsClass
+{
+ protected:
+
+
+ public:
+	void init();
+	bool ForwardKinematicsCalculations(Angle angleposition, Point &point);
+	bool InverseKinematicsCalculations(Point point, Angle &angleposition);
+
+private:
+	bool AngleThetaCalculations(float x0, float y0, float z0, float &theta);
+	float _y0_;
+	float _y1_;
+	float RD_RF_Pow2;
+	float RD_RE_Pow2;
+};
+
+extern DeltaKinematicsClass DeltaKinematics;
+
+#endif
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "EndEffector.h"
+
+void EndEffectorClass::init()
+{
+	pinMode(VACCUM_PIN, OUTPUT);
+
+	pinMode(SPINDLE_LASER_ENABLE_PIN, OUTPUT);
+	pinMode(SPINDLE_LASER_PWM_PIN, OUTPUT);
+
+	pinMode(CUSTOM_PWM_PIN, OUTPUT);
+	pinMode(CUSTOM_DIR_PIN, OUTPUT);
+
+	pinMode(EXTRUSDER_PULSE_PIN, OUTPUT);
+	pinMode(EXTRUSDER_DIRECTION_PIN, OUTPUT);
+	pinMode(EXTRUSDER_ENABLE_PIN, OUTPUT);
+
+}
+
+void EndEffectorClass::ResetEndEffectorOutput()
+{
+	analogWrite(VACCUM_PIN, 0);
+
+	analogWrite(SPINDLE_LASER_ENABLE_PIN, 0);
+	analogWrite(SPINDLE_LASER_PWM_PIN, 0);
+	WRITE(CUSTOM_PWM_PIN, 0);
+	analogWrite(CUSTOM_DIR_PIN, 0);
+
+	WRITE(EXTRUSDER_ENABLE_PIN, 0);
+
+	Data.ExtrustionPosition = 0;
+
+	if (Data.End_Effector == USE_LASER)
+	{
+		analogWrite(SPINDLE_LASER_ENABLE_PIN, 255);
+	}
+
+	if (Data.End_Effector == USE_PRINTER)
+	{
+		analogWrite(SPINDLE_LASER_ENABLE_PIN, 255);
+		Temperature.init();
+	}
+
+	if (Data.End_Effector != USE_PRINTER && Data.End_Effector != USE_LASER)
+	{
+		MultiServo.ServoArray[1].servo.attach(CLIP_SERVO_PIN);
+	}
+
+	MultiServo.AddAngle(CLAMP, CLIP_OPEN_ANGLE_SERVO);
+	MultiServo.Running();
+}
+
+void EndEffectorClass::TurnOffEndEffector()
+{
+	switch (Data.End_Effector)
+	{
+	case USE_VACUUM:
+		analogWrite(VACCUM_PIN, 0);
+		break;
+	case USE_LASER:
+		analogWrite(SPINDLE_LASER_PWM_PIN, 0);
+		break;
+	case USE_CLIP:
+		MultiServo.AddAngle(CLAMP, CLIP_OPEN_ANGLE_SERVO);
+		MultiServo.Running();
+		break;
+	case USE_PEN:
+		break;
+	case USE_CUSTOM:
+		digitalWrite(CUSTOM_DIR_PIN, 0);
+		analogWrite(CUSTOM_PWM_PIN, 0);
+		break;
+	case USE_PRINTER:
+		digitalWrite(EXTRUSDER_ENABLE_PIN, 1);
+		break;
+	default:
+		break;
+	}
+}
+
+void EndEffectorClass::TurnOnEndEffector(byte eValue, bool iSw)
+{
+	switch (Data.End_Effector)
+	{
+	case USE_VACUUM:
+		analogWrite(VACCUM_PIN, 255);
+		break;
+	case USE_LASER:		
+		analogWrite(SPINDLE_LASER_PWM_PIN, eValue);
+		break;
+	case USE_CLIP:
+		if (eValue > 100)
+		{
+			MultiServo.AddAngle(CLAMP, CLIP_CLOSE_ANGLE_SERVO);
+		}
+		else
+		{
+			byte clipValue = eValue * (CLIP_OPEN_ANGLE_SERVO - CLIP_CLOSE_ANGLE_SERVO) / 100;
+			MultiServo.AddAngle(CLAMP, CLIP_OPEN_ANGLE_SERVO - clipValue);
+		}
+
+		MultiServo.Running();
+		break;
+	case USE_PEN:
+		break;
+	case USE_CUSTOM:
+		digitalWrite(CUSTOM_DIR_PIN, iSw);
+		analogWrite(CUSTOM_PWM_PIN, eValue);
+		break;
+	case USE_PRINTER:
+		digitalWrite(EXTRUSDER_ENABLE_PIN, 0);
+		break;
+	default:
+		break;
+	}
+}
+
+EndEffectorClass EndEffector;
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+// EndEffector.h
+
+#ifndef _ENDEFFECTOR_h
+#define _ENDEFFECTOR_h
+
+#if defined(ARDUINO) && ARDUINO >= 100
+	#include "arduino.h"
+#else
+	#include "WProgram.h"
+#endif
+
+#include "config.h"
+#include "Constants.h"
+#include "enum.h"
+
+#include "pin.h"
+#include "fastio.h"
+
+#include "MultiServo.h"
+#include "Temperature.h"
+
+class EndEffectorClass
+{
+ protected:
+
+
+ public:
+	void init();
+	void ResetEndEffectorOutput();
+	void TurnOffEndEffector();
+	void TurnOnEndEffector(byte eValue, bool iSw);
+
+private:
+
+};
+
+extern EndEffectorClass EndEffector;
+
+#endif
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "EndStops.h"
+
+void EndStopsClass::init()
+{
+#if THETA1_ENDSTOP_INVERT != false
+	pinMode(THETA1_ENDSTOP_PIN, INPUT);
+#else
+	pinMode(THETA1_ENDSTOP_PIN, INPUT_PULLUP);
+#endif // THETA1_ENDSTOP_INVERT
+
+#if THETA2_ENDSTOP_INVERT != false
+	pinMode(THETA2_ENDSTOP_PIN, INPUT);
+#else
+	pinMode(THETA2_ENDSTOP_PIN, INPUT_PULLUP);
+#endif // THETA1_ENDSTOP_INVERT
+
+#if THETA3_ENDSTOP_INVERT != false
+	pinMode(THETA3_ENDSTOP_PIN, INPUT);
+#else
+	pinMode(THETA3_ENDSTOP_PIN, INPUT_PULLUP);
+#endif // THETA1_ENDSTOP_INVERT
+
+#ifdef ENDSTOP_FOR_CHECK_Z_AREA
+#if ENDSTOP_FOR_CHECK_Z_AREA_INVERT != false
+	pinMode(ENDSTOP_FOR_CHECK_Z_AREA_PIN, INPUT);
+#else
+	pinMode(ENDSTOP_FOR_CHECK_Z_AREA_PIN, INPUT_PULLUP);
+#endif // THETA1_ENDSTOP_INVERT
+#endif
+
+	//HomePhase = 0;
+	ClearEndstopState();
+}
+
+void EndStopsClass::UpdateStates()
+{
+	if (READ(THETA1_ENDSTOP_PIN) == THETA1_ENDSTOP_INVERT)
+	{
+		Theta1State = true;
+	}
+	else
+	{
+		Theta1State = false;
+	}
+
+	if (READ(THETA2_ENDSTOP_PIN) == THETA2_ENDSTOP_INVERT)
+	{
+		Theta2State = true;
+	}
+	else
+	{
+		Theta2State = false;
+	}
+
+	if (READ(THETA3_ENDSTOP_PIN) == THETA3_ENDSTOP_INVERT)
+	{
+		Theta3State = true;
+	}
+	else
+	{
+		Theta3State = false;
+	}
+
+#ifdef ENDSTOP_FOR_CHECK_Z_AREA
+	if (READ(ENDSTOP_FOR_CHECK_Z_AREA_PIN) == ENDSTOP_FOR_CHECK_Z_AREA_INVERT)
+	{
+		ZAreaState = true;
+	}
+	else
+	{
+		ZAreaState = false;
+	}
+#endif
+}
+
+bool EndStopsClass::HomingCheck()
+{
+	if (Theta1State == true && Theta2State == true && Theta3State == true)
+	{
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+
+void EndStopsClass::ReportStates()
+{
+	UpdateStates();
+	SERIAL_PORT.print("EndStopStates: ");
+	SERIAL_PORT.print(Theta1State);
+	SERIAL_PORT.print(", ");
+	SERIAL_PORT.print(Theta2State);
+	SERIAL_PORT.print(", ");
+	SERIAL_PORT.println(Theta3State);
+}
+
+bool EndStopsClass::States(AXIS axis)
+{
+	switch (axis)
+	{
+	case THETA_1:
+		return Theta1State;
+		break;
+	case THETA_2:
+		return Theta2State;
+		break;
+	case THETA_3:
+		return Theta3State;
+		break;
+	default:
+		break;
+	}
+	return false;
+}
+
+void EndStopsClass::ClearEndstopState()
+{
+	Theta1State = false;
+	Theta2State = false;
+	Theta3State = false;
+
+#ifdef ENDSTOP_FOR_CHECK_Z_AREA
+	ZAreaState = false;
+#endif
+}
+
+EndStopsClass EndStops;
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+// EndStops.h
+
+#ifndef _ENDSTOPS_h
+#define _ENDSTOPS_h
+
+#if defined(ARDUINO) && ARDUINO >= 100
+	#include "arduino.h"
+#else
+	#include "WProgram.h"
+#endif
+
+#include "config.h"
+#include "enum.h"
+
+#include "pin.h"
+#include "fastio.h"
+
+class EndStopsClass
+{
+ protected:
+
+
+ public:
+	void init();
+	void UpdateStates();
+	bool HomingCheck();
+	void ReportStates();
+	bool States(AXIS axis);
+	void ClearEndstopState();
+
+private:
+	bool Theta1State;
+	bool Theta2State;
+	bool Theta3State;
+
+#ifdef ENDSTOP_FOR_CHECK_Z_AREA
+	bool ZAreaState;
+#endif
+	//uint8_t HomePhase;
+};
+
+extern EndStopsClass EndStops;
+
+#endif
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#pragma once
+
+#include "config.h"
+
+typedef enum
+{
+	THETA_1 = 0,
+	THETA_2,
+	THETA_3,
+#ifdef DELTA_AXIS_4
+	AXIS_4,
+#endif // DELTA_AXIS_4
+#ifdef DELTA_AXIS_5
+	AXIS_5,
+#endif // DELTA_AXIS_5
+#ifdef CLIP
+	CLAMP
+#endif // CLIP
+}AXIS;
+
+#ifdef REVERSE_DIRECTION
+typedef enum
+{
+	DECREASE = 0,
+	INCREASE
+}VARIATION;
+#else
+typedef enum
+{
+	INCREASE = 0,
+	DECREASE
+}VARIATION;
+#endif // reverse direction
+
+typedef enum
+{
+	USE_STEPPER = 0,
+	USE_SERVO
+}MOTIVE;
+
+typedef enum
+{
+	USE_VACUUM = 0,
+	USE_CLIP,
+	USE_PEN,
+	USE_LASER,
+	USE_PRINTER,
+	USE_CUSTOM
+}END_EFFECTOR;
+
+typedef enum
+{
+	BEGIN_SEG = 0,
+	END_SEG,
+	CHANGE_VELOCITY_SEG,
+	FIXED_VELICITY_SEG,
+	MOVING_HOME
+}TYPE_SEGMENT;
+
+typedef enum
+{
+	RED = 0,
+	GREEN,
+	BLUE,
+}COLOR;
+
+//#define A(CODE) " " CODE "\n\t"
+
+/*
+  This code contributed by Triffid_Hunter and modified by Kliment
+  why double up on these macros? see http://gcc.gnu.org/onlinedocs/cpp/Stringification.html
+*/
+
+#ifndef	_FASTIO_ARDUINO_H
+#define	_FASTIO_ARDUINO_H
+
+//#include <avr/io.h>
+
+/*
+  utility functions
+*/
+
+#ifndef MASK
+/// MASKING- returns \f$2^PIN\f$
+#define MASK(PIN)  (1 << PIN)
+#endif
+
+/*
+  magic I/O routines
+  now you can simply SET_OUTPUT(STEP); WRITE(STEP, 1); WRITE(STEP, 0);
+*/
+
+/// Read a pin
+#define _READ(IO) ((bool)(DIO ## IO ## _RPORT & MASK(DIO ## IO ## _PIN)))
+/// write to a pin
+// On some boards pins > 0x100 are used. These are not converted to atomic actions. An critical section is needed.
+
+#define _WRITE_NC(IO, v)  do { if (v) {DIO ##  IO ## _WPORT |= MASK(DIO ## IO ## _PIN); } else {DIO ##  IO ## _WPORT &= ~MASK(DIO ## IO ## _PIN); }; } while (0)
+
+#define _WRITE_C(IO, v)  do { if (v) {DIO ##  IO ## _WPORT |= MASK(DIO ## IO ## _PIN); } else  {DIO ##  IO ## _WPORT &= ~MASK(DIO ## IO ## _PIN); }; } while (0)
+
+#define _WRITE(IO, v)  do {  if (&(DIO ##  IO ## _RPORT) >= (uint8_t *)0x100) {_WRITE_C(IO, v); } else {_WRITE_NC(IO, v); }; } while (0)
+
+/// toggle a pin
+#define _TOGGLE(IO)  do {DIO ##  IO ## _RPORT = MASK(DIO ## IO ## _PIN); } while (0)
+
+/// set pin as input
+#define	_SET_INPUT(IO) do {DIO ##  IO ## _DDR &= ~MASK(DIO ## IO ## _PIN); } while (0)
+/// set pin as output
+#define	_SET_OUTPUT(IO) do {DIO ##  IO ## _DDR |=  MASK(DIO ## IO ## _PIN); } while (0)
+
+/// check if pin is an input
+#define	_GET_INPUT(IO)  ((DIO ## IO ## _DDR & MASK(DIO ## IO ## _PIN)) == 0)
+/// check if pin is an output
+#define	_GET_OUTPUT(IO)  ((DIO ## IO ## _DDR & MASK(DIO ## IO ## _PIN)) != 0)
+
+/// check if pin is an timer
+#define	_GET_TIMER(IO)  ((DIO ## IO ## _PWM)
+
+//  why double up on these macros? see http://gcc.gnu.org/onlinedocs/cpp/Stringification.html
+
+/// Read a pin wrapper
+#define READ(IO)  _READ(IO)
+/// Write to a pin wrapper
+#define WRITE(IO, v)  _WRITE(IO, v)
+
+/// toggle a pin wrapper
+#define TOGGLE(IO)  _TOGGLE(IO)
+
+/// set pin as input wrapper
+#define SET_INPUT(IO)  _SET_INPUT(IO)
+/// set pin as output wrapper
+#define SET_OUTPUT(IO)  _SET_OUTPUT(IO)
+
+/// check if pin is an input wrapper
+#define GET_INPUT(IO)  _GET_INPUT(IO)
+/// check if pin is an output wrapper
+#define GET_OUTPUT(IO)  _GET_OUTPUT(IO)
+
+/// check if pin is an timer wrapper
+#define GET_TIMER(IO)  _GET_TIMER(IO)
+
+/*
+	ports and functions
+
+	added as necessary or if I feel like it- not a comprehensive list!
+*/
+#if defined (__AVR_ATmega1280__) || defined (__AVR_ATmega2560__)
+// UART
+#define	RXD					DIO0
+#define	TXD					DIO1
+
+// SPI
+#define	SCK					DIO52
+#define	MISO				DIO50
+#define	MOSI				DIO51
+#define	SS					DIO53
+
+// TWI (I2C)
+#define	SCL					DIO21
+#define	SDA					DIO20
+
+// timers and PWM
+#define	OC0A				DIO13
+#define	OC0B				DIO4
+#define	OC1A				DIO11
+#define	OC1B				DIO12
+#define	OC2A				DIO10
+#define	OC2B				DIO9
+#define	OC3A				DIO5
+#define	OC3B				DIO2
+#define	OC3C				DIO3
+#define	OC4A				DIO6
+#define	OC4B				DIO7
+#define	OC4C				DIO8
+#define	OC5A				DIO46
+#define	OC5B				DIO45
+#define	OC5C				DIO44
+
+// change for your board
+#define	DEBUG_LED		DIO21
+
+/*
+pins
+*/
+#define	DIO0_PIN		PINE0
+#define	DIO0_RPORT	PINE
+#define	DIO0_WPORT	PORTE
+#define	DIO0_DDR		DDRE
+#define DIO0_PWM		NULL
+
+#define	DIO1_PIN		PINE1
+#define	DIO1_RPORT	PINE
+#define	DIO1_WPORT	PORTE
+#define	DIO1_DDR		DDRE
+#define DIO1_PWM		NULL
+
+#define	DIO2_PIN		PINE4
+#define	DIO2_RPORT	PINE
+#define	DIO2_WPORT	PORTE
+#define	DIO2_DDR		DDRE
+#define DIO2_PWM		&OCR3BL
+
+#define	DIO3_PIN		PINE5
+#define	DIO3_RPORT	PINE
+#define	DIO3_WPORT	PORTE
+#define	DIO3_DDR		DDRE
+#define DIO3_PWM		&OCR3CL
+
+#define	DIO4_PIN		PING5
+#define	DIO4_RPORT	PING
+#define	DIO4_WPORT	PORTG
+#define	DIO4_DDR		DDRG
+#define DIO4_PWM		&OCR0B
+
+#define	DIO5_PIN		PINE3
+#define	DIO5_RPORT	PINE
+#define	DIO5_WPORT	PORTE
+#define	DIO5_DDR		DDRE
+#define DIO5_PWM		&OCR3AL
+
+#define	DIO6_PIN		PINH3
+#define	DIO6_RPORT	PINH
+#define	DIO6_WPORT	PORTH
+#define	DIO6_DDR		DDRH
+#define DIO6_PWM		&OCR4AL
+
+#define	DIO7_PIN		PINH4
+#define	DIO7_RPORT	PINH
+#define	DIO7_WPORT	PORTH
+#define	DIO7_DDR		DDRH
+#define DIO7_PWM		&OCR4BL
+
+#define	DIO8_PIN		PINH5
+#define	DIO8_RPORT	PINH
+#define	DIO8_WPORT	PORTH
+#define	DIO8_DDR		DDRH
+#define DIO8_PWM		&OCR4CL
+
+#define	DIO9_PIN		PINH6
+#define	DIO9_RPORT	PINH
+#define	DIO9_WPORT	PORTH
+#define	DIO9_DDR		DDRH
+#define DIO9_PWM		&OCR2B
+
+#define	DIO10_PIN		PINB4
+#define	DIO10_RPORT	PINB
+#define	DIO10_WPORT	PORTB
+#define	DIO10_DDR		DDRB
+#define DIO10_PWM		&OCR2A
+
+#define	DIO11_PIN		PINB5
+#define	DIO11_RPORT	PINB
+#define	DIO11_WPORT	PORTB
+#define	DIO11_DDR		DDRB
+#define DIO11_PWM		NULL
+
+#define	DIO12_PIN		PINB6
+#define	DIO12_RPORT	PINB
+#define	DIO12_WPORT	PORTB
+#define	DIO12_DDR		DDRB
+#define DIO12_PWM		NULL
+
+#define	DIO13_PIN		PINB7
+#define	DIO13_RPORT	PINB
+#define	DIO13_WPORT	PORTB
+#define	DIO13_DDR		DDRB
+#define DIO13_PWM		&OCR0A
+
+#define	DIO14_PIN		PINJ1
+#define	DIO14_RPORT	PINJ
+#define	DIO14_WPORT	PORTJ
+#define	DIO14_DDR		DDRJ
+#define DIO14_PWM		NULL
+
+#define	DIO15_PIN		PINJ0
+#define	DIO15_RPORT	PINJ
+#define	DIO15_WPORT	PORTJ
+#define	DIO15_DDR		DDRJ
+#define DIO15_PWM		NULL
+
+#define	DIO16_PIN		PINH1
+#define	DIO16_RPORT	PINH
+#define	DIO16_WPORT	PORTH
+#define	DIO16_DDR		DDRH
+#define DIO16_PWM		NULL
+
+#define	DIO17_PIN		PINH0
+#define	DIO17_RPORT	PINH
+#define	DIO17_WPORT	PORTH
+#define	DIO17_DDR		DDRH
+#define DIO17_PWM		NULL
+
+#define	DIO18_PIN		PIND3
+#define	DIO18_RPORT	PIND
+#define	DIO18_WPORT	PORTD
+#define	DIO18_DDR		DDRD
+#define DIO18_PWM		NULL
+
+#define	DIO19_PIN		PIND2
+#define	DIO19_RPORT	PIND
+#define	DIO19_WPORT	PORTD
+#define	DIO19_DDR		DDRD
+#define DIO19_PWM		NULL
+
+#define	DIO20_PIN		PIND1
+#define	DIO20_RPORT	PIND
+#define	DIO20_WPORT	PORTD
+#define	DIO20_DDR		DDRD
+#define DIO20_PWM		NULL
+
+#define	DIO21_PIN		PIND0
+#define	DIO21_RPORT	PIND
+#define	DIO21_WPORT	PORTD
+#define	DIO21_DDR		DDRD
+#define DIO21_PWM		NULL
+
+#define	DIO22_PIN		PINA0
+#define	DIO22_RPORT	PINA
+#define	DIO22_WPORT	PORTA
+#define	DIO22_DDR		DDRA
+#define DIO22_PWM		NULL
+
+#define	DIO23_PIN		PINA1
+#define	DIO23_RPORT	PINA
+#define	DIO23_WPORT	PORTA
+#define	DIO23_DDR		DDRA
+#define DIO23_PWM		NULL
+
+#define	DIO24_PIN		PINA2
+#define	DIO24_RPORT	PINA
+#define	DIO24_WPORT	PORTA
+#define	DIO24_DDR		DDRA
+#define DIO24_PWM		NULL
+
+#define	DIO25_PIN		PINA3
+#define	DIO25_RPORT	PINA
+#define	DIO25_WPORT	PORTA
+#define	DIO25_DDR		DDRA
+#define DIO25_PWM		NULL
+
+#define	DIO26_PIN		PINA4
+#define	DIO26_RPORT	PINA
+#define	DIO26_WPORT	PORTA
+#define	DIO26_DDR		DDRA
+#define DIO26_PWM		NULL
+
+#define	DIO27_PIN		PINA5
+#define	DIO27_RPORT	PINA
+#define	DIO27_WPORT	PORTA
+#define	DIO27_DDR		DDRA
+#define DIO27_PWM		NULL
+
+#define	DIO28_PIN		PINA6
+#define	DIO28_RPORT	PINA
+#define	DIO28_WPORT	PORTA
+#define	DIO28_DDR		DDRA
+#define DIO28_PWM		NULL
+
+#define	DIO29_PIN		PINA7
+#define	DIO29_RPORT	PINA
+#define	DIO29_WPORT	PORTA
+#define	DIO29_DDR		DDRA
+#define DIO29_PWM		NULL
+
+#define	DIO30_PIN		PINC7
+#define	DIO30_RPORT	PINC
+#define	DIO30_WPORT	PORTC
+#define	DIO30_DDR		DDRC
+#define DIO30_PWM		NULL
+
+#define	DIO31_PIN		PINC6
+#define	DIO31_RPORT	PINC
+#define	DIO31_WPORT	PORTC
+#define	DIO31_DDR		DDRC
+#define DIO31_PWM		NULL
+
+#define	DIO32_PIN		PINC5
+#define	DIO32_RPORT	PINC
+#define	DIO32_WPORT	PORTC
+#define	DIO32_DDR		DDRC
+#define DIO32_PWM		NULL
+
+#define	DIO33_PIN		PINC4
+#define	DIO33_RPORT	PINC
+#define	DIO33_WPORT	PORTC
+#define	DIO33_DDR		DDRC
+#define DIO33_PWM		NULL
+
+#define	DIO34_PIN		PINC3
+#define	DIO34_RPORT	PINC
+#define	DIO34_WPORT	PORTC
+#define	DIO34_DDR		DDRC
+#define DIO34_PWM		NULL
+
+#define	DIO35_PIN		PINC2
+#define	DIO35_RPORT	PINC
+#define	DIO35_WPORT	PORTC
+#define	DIO35_DDR		DDRC
+#define DIO35_PWM		NULL
+
+#define	DIO36_PIN		PINC1
+#define	DIO36_RPORT	PINC
+#define	DIO36_WPORT	PORTC
+#define	DIO36_DDR		DDRC
+#define DIO36_PWM		NULL
+
+#define	DIO37_PIN		PINC0
+#define	DIO37_RPORT	PINC
+#define	DIO37_WPORT	PORTC
+#define	DIO37_DDR		DDRC
+#define DIO37_PWM		NULL
+
+#define	DIO38_PIN		PIND7
+#define	DIO38_RPORT	PIND
+#define	DIO38_WPORT	PORTD
+#define	DIO38_DDR		DDRD
+#define DIO38_PWM		NULL
+
+#define	DIO39_PIN		PING2
+#define	DIO39_RPORT	PING
+#define	DIO39_WPORT	PORTG
+#define	DIO39_DDR		DDRG
+#define DIO39_PWM		NULL
+
+#define	DIO40_PIN		PING1
+#define	DIO40_RPORT	PING
+#define	DIO40_WPORT	PORTG
+#define	DIO40_DDR		DDRG
+#define DIO40_PWM		NULL
+
+#define	DIO41_PIN		PING0
+#define	DIO41_RPORT	PING
+#define	DIO41_WPORT	PORTG
+#define	DIO41_DDR		DDRG
+#define DIO41_PWM		NULL
+
+#define	DIO42_PIN		PINL7
+#define	DIO42_RPORT	PINL
+#define	DIO42_WPORT	PORTL
+#define	DIO42_DDR		DDRL
+#define DIO42_PWM		NULL
+
+#define	DIO43_PIN		PINL6
+#define	DIO43_RPORT	PINL
+#define	DIO43_WPORT	PORTL
+#define	DIO43_DDR		DDRL
+#define DIO43_PWM		NULL
+
+#define	DIO44_PIN		PINL5
+#define	DIO44_RPORT	PINL
+#define	DIO44_WPORT	PORTL
+#define	DIO44_DDR		DDRL
+#define DIO44_PWM		&OCR5CL
+
+#define	DIO45_PIN		PINL4
+#define	DIO45_RPORT	PINL
+#define	DIO45_WPORT	PORTL
+#define	DIO45_DDR		DDRL
+#define DIO45_PWM		&OCR5BL
+
+#define	DIO46_PIN		PINL3
+#define	DIO46_RPORT	PINL
+#define	DIO46_WPORT	PORTL
+#define	DIO46_DDR		DDRL
+#define DIO46_PWM		&OCR5AL
+
+#define	DIO47_PIN		PINL2
+#define	DIO47_RPORT	PINL
+#define	DIO47_WPORT	PORTL
+#define	DIO47_DDR		DDRL
+#define DIO47_PWM		NULL
+
+#define	DIO48_PIN		PINL1
+#define	DIO48_RPORT	PINL
+#define	DIO48_WPORT	PORTL
+#define	DIO48_DDR		DDRL
+#define DIO48_PWM		NULL
+
+#define	DIO49_PIN		PINL0
+#define	DIO49_RPORT	PINL
+#define	DIO49_WPORT	PORTL
+#define	DIO49_DDR		DDRL
+#define DIO49_PWM		NULL
+
+#define	DIO50_PIN		PINB3
+#define	DIO50_RPORT	PINB
+#define	DIO50_WPORT	PORTB
+#define	DIO50_DDR		DDRB
+#define DIO50_PWM		NULL
+
+#define	DIO51_PIN		PINB2
+#define	DIO51_RPORT	PINB
+#define	DIO51_WPORT	PORTB
+#define	DIO51_DDR		DDRB
+#define DIO51_PWM		NULL
+
+#define	DIO52_PIN		PINB1
+#define	DIO52_RPORT	PINB
+#define	DIO52_WPORT	PORTB
+#define	DIO52_DDR		DDRB
+#define DIO52_PWM		NULL
+
+#define	DIO53_PIN		PINB0
+#define	DIO53_RPORT	PINB
+#define	DIO53_WPORT	PORTB
+#define	DIO53_DDR		DDRB
+#define DIO53_PWM		NULL
+
+#define DIO54_PIN		PINF0
+#define DIO54_RPORT	PINF
+#define DIO54_WPORT	PORTF
+#define DIO54_DDR		DDRF
+#define DIO54_PWM		NULL
+
+#define DIO55_PIN		PINF1
+#define DIO55_RPORT	PINF
+#define DIO55_WPORT	PORTF
+#define DIO55_DDR		DDRF
+#define DIO55_PWM		NULL
+
+#define DIO56_PIN		PINF2
+#define DIO56_RPORT	PINF
+#define DIO56_WPORT	PORTF
+#define DIO56_DDR		DDRF
+#define DIO56_PWM		NULL
+
+#define DIO57_PIN		PINF3
+#define DIO57_RPORT	PINF
+#define DIO57_WPORT	PORTF
+#define DIO57_DDR		DDRF
+#define DIO57_PWM		NULL
+
+#define DIO58_PIN		PINF4
+#define DIO58_RPORT	PINF
+#define DIO58_WPORT	PORTF
+#define DIO58_DDR		DDRF
+#define DIO58_PWM		NULL
+
+#define DIO59_PIN		PINF5
+#define DIO59_RPORT	PINF
+#define DIO59_WPORT	PORTF
+#define DIO59_DDR		DDRF
+#define DIO59_PWM		NULL
+
+#define DIO60_PIN		PINF6
+#define DIO60_RPORT	PINF
+#define DIO60_WPORT	PORTF
+#define DIO60_DDR		DDRF
+#define DIO60_PWM		NULL
+
+#define DIO61_PIN		PINF7
+#define DIO61_RPORT	PINF
+#define DIO61_WPORT	PORTF
+#define DIO61_DDR		DDRF
+#define DIO61_PWM		NULL
+
+#define DIO62_PIN		PINK0
+#define DIO62_RPORT	PINK
+#define DIO62_WPORT	PORTK
+#define DIO62_DDR		DDRK
+#define DIO62_PWM		NULL
+
+#define DIO63_PIN		PINK1
+#define DIO63_RPORT	PINK
+#define DIO63_WPORT	PORTK
+#define DIO63_DDR		DDRK
+#define DIO63_PWM		NULL
+
+#define DIO64_PIN		PINK2
+#define DIO64_RPORT	PINK
+#define DIO64_WPORT	PORTK
+#define DIO64_DDR		DDRK
+#define DIO64_PWM		NULL
+
+#define DIO65_PIN		PINK3
+#define DIO65_RPORT	PINK
+#define DIO65_WPORT	PORTK
+#define DIO65_DDR		DDRK
+#define DIO65_PWM		NULL
+
+#define DIO66_PIN		PINK4
+#define DIO66_RPORT	PINK
+#define DIO66_WPORT	PORTK
+#define DIO66_DDR		DDRK
+#define DIO66_PWM		NULL
+
+#define DIO67_PIN		PINK5
+#define DIO67_RPORT	PINK
+#define DIO67_WPORT	PORTK
+#define DIO67_DDR		DDRK
+#define DIO67_PWM		NULL
+
+#define DIO68_PIN		PINK6
+#define DIO68_RPORT	PINK
+#define DIO68_WPORT	PORTK
+#define DIO68_DDR		DDRK
+#define DIO68_PWM		NULL
+
+#define DIO69_PIN		PINK7
+#define DIO69_RPORT	PINK
+#define DIO69_WPORT	PORTK
+#define DIO69_DDR		DDRK
+#define DIO69_PWM		NULL
+
+#define DIO70_PIN		PING4
+#define DIO70_RPORT	PING
+#define DIO70_WPORT	PORTG
+#define DIO70_DDR		DDRG
+#define DIO70_PWM		NULL
+
+#define DIO71_PIN		PING3
+#define DIO71_RPORT	PING
+#define DIO71_WPORT	PORTG
+#define DIO71_DDR		DDRG
+#define DIO71_PWM		NULL
+
+#define DIO72_PIN		PINJ2
+#define DIO72_RPORT	PINJ
+#define DIO72_WPORT	PORTJ
+#define DIO72_DDR		DDRJ
+#define DIO72_PWM		NULL
+
+#define DIO73_PIN		PINJ3
+#define DIO73_RPORT	PINJ
+#define DIO73_WPORT	PORTJ
+#define DIO73_DDR		DDRJ
+#define DIO73_PWM		NULL
+
+#define DIO74_PIN		PINJ7
+#define DIO74_RPORT	PINJ
+#define DIO74_WPORT	PORTJ
+#define DIO74_DDR		DDRJ
+#define DIO74_PWM		NULL
+
+#define DIO75_PIN		PINJ4
+#define DIO75_RPORT	PINJ
+#define DIO75_WPORT	PORTJ
+#define DIO75_DDR		DDRJ
+#define DIO75_PWM		NULL
+
+#define DIO76_PIN		PINJ5
+#define DIO76_RPORT	PINJ
+#define DIO76_WPORT	PORTJ
+#define DIO76_DDR		DDRJ
+#define DIO76_PWM		NULL
+
+#define DIO77_PIN		PINJ6
+#define DIO77_RPORT	PINJ
+#define DIO77_WPORT	PORTJ
+#define DIO77_DDR		DDRJ
+#define DIO77_PWM		NULL
+
+#define DIO78_PIN		PINE2
+#define DIO78_RPORT	PINE
+#define DIO78_WPORT	PORTE
+#define DIO78_DDR		DDRE
+#define DIO78_PWM		NULL
+
+#define DIO79_PIN		PINE6
+#define DIO79_RPORT	PINE
+#define DIO79_WPORT	PORTE
+#define DIO79_DDR		DDRE
+#define DIO79_PWM		NULL
+
+#define DIO80_PIN		PINE7
+#define DIO80_RPORT	PINE
+#define DIO80_WPORT	PORTE
+#define DIO80_DDR		DDRE
+#define DIO80_PWM		NULL
+
+#define DIO81_PIN		PIND4
+#define DIO81_RPORT	PIND
+#define DIO81_WPORT	PORTD
+#define DIO81_DDR		DDRD
+#define DIO81_PWM		NULL
+
+#define DIO82_PIN		PIND5
+#define DIO82_RPORT	PIND
+#define DIO82_WPORT	PORTD
+#define DIO82_DDR		DDRD
+#define DIO82_PWM		NULL
+
+#define DIO83_PIN		PIND6
+#define DIO83_RPORT	PIND
+#define DIO83_WPORT	PORTD
+#define DIO83_DDR		DDRD
+#define DIO83_PWM		NULL
+
+#define DIO84_PIN		PINH2
+#define DIO84_RPORT	PINH
+#define DIO84_WPORT	PORTH
+#define DIO84_DDR		DDRH
+#define DIO84_PWM		NULL
+
+#define DIO85_PIN		PINH7
+#define DIO85_RPORT	PINH
+#define DIO85_WPORT	PORTH
+#define DIO85_DDR		DDRH
+#define DIO85_PWM		NULL
+
+#undef PA0
+#define PA0_PIN			PINA0
+#define PA0_RPORT		PINA
+#define PA0_WPORT		PORTA
+#define PA0_DDR			DDRA
+#define PA0_PWM			NULL
+#undef PA1
+#define PA1_PIN			PINA1
+#define PA1_RPORT		PINA
+#define PA1_WPORT		PORTA
+#define PA1_DDR			DDRA
+#define PA1_PWM			NULL
+#undef PA2
+#define PA2_PIN			PINA2
+#define PA2_RPORT		PINA
+#define PA2_WPORT		PORTA
+#define PA2_DDR			DDRA
+#define PA2_PWM			NULL
+#undef PA3
+#define PA3_PIN			PINA3
+#define PA3_RPORT		PINA
+#define PA3_WPORT		PORTA
+#define PA3_DDR			DDRA
+#define PA3_PWM			NULL
+#undef PA4
+#define PA4_PIN			PINA4
+#define PA4_RPORT		PINA
+#define PA4_WPORT		PORTA
+#define PA4_DDR			DDRA
+#define PA4_PWM			NULL
+#undef PA5
+#define PA5_PIN			PINA5
+#define PA5_RPORT		PINA
+#define PA5_WPORT		PORTA
+#define PA5_DDR			DDRA
+#define PA5_PWM			NULL
+#undef PA6
+#define PA6_PIN			PINA6
+#define PA6_RPORT		PINA
+#define PA6_WPORT		PORTA
+#define PA6_DDR			DDRA
+#define PA6_PWM			NULL
+#undef PA7
+#define PA7_PIN			PINA7
+#define PA7_RPORT		PINA
+#define PA7_WPORT		PORTA
+#define PA7_DDR			DDRA
+#define PA7_PWM			NULL
+
+#undef PB0
+#define PB0_PIN			PINB0
+#define PB0_RPORT		PINB
+#define PB0_WPORT		PORTB
+#define PB0_DDR			DDRB
+#define PB0_PWM			NULL
+#undef PB1
+#define PB1_PIN			PINB1
+#define PB1_RPORT		PINB
+#define PB1_WPORT		PORTB
+#define PB1_DDR			DDRB
+#define PB1_PWM			NULL
+#undef PB2
+#define PB2_PIN			PINB2
+#define PB2_RPORT		PINB
+#define PB2_WPORT		PORTB
+#define PB2_DDR			DDRB
+#define PB2_PWM			NULL
+#undef PB3
+#define PB3_PIN			PINB3
+#define PB3_RPORT		PINB
+#define PB3_WPORT		PORTB
+#define PB3_DDR			DDRB
+#define PB3_PWM			NULL
+#undef PB4
+#define PB4_PIN			PINB4
+#define PB4_RPORT		PINB
+#define PB4_WPORT		PORTB
+#define PB4_DDR			DDRB
+#define PB4_PWM			&OCR2A
+#undef PB5
+#define PB5_PIN			PINB5
+#define PB5_RPORT		PINB
+#define PB5_WPORT		PORTB
+#define PB5_DDR			DDRB
+#define PB5_PWM			NULL
+#undef PB6
+#define PB6_PIN			PINB6
+#define PB6_RPORT		PINB
+#define PB6_WPORT		PORTB
+#define PB6_DDR			DDRB
+#define PB6_PWM			NULL
+#undef PB7
+#define PB7_PIN			PINB7
+#define PB7_RPORT		PINB
+#define PB7_WPORT		PORTB
+#define PB7_DDR			DDRB
+#define PB7_PWM			&OCR0A
+
+#undef PC0
+#define PC0_PIN			PINC0
+#define PC0_RPORT		PINC
+#define PC0_WPORT		PORTC
+#define PC0_DDR			DDRC
+#define PC0_PWM			NULL
+#undef PC1
+#define PC1_PIN			PINC1
+#define PC1_RPORT		PINC
+#define PC1_WPORT		PORTC
+#define PC1_DDR			DDRC
+#define PC1_PWM			NULL
+#undef PC2
+#define PC2_PIN			PINC2
+#define PC2_RPORT		PINC
+#define PC2_WPORT		PORTC
+#define PC2_DDR			DDRC
+#define PC2_PWM			NULL
+#undef PC3
+#define PC3_PIN			PINC3
+#define PC3_RPORT		PINC
+#define PC3_WPORT		PORTC
+#define PC3_DDR			DDRC
+#define PC3_PWM			NULL
+#undef PC4
+#define PC4_PIN			PINC4
+#define PC4_RPORT		PINC
+#define PC4_WPORT		PORTC
+#define PC4_DDR			DDRC
+#define PC4_PWM			NULL
+#undef PC5
+#define PC5_PIN			PINC5
+#define PC5_RPORT		PINC
+#define PC5_WPORT		PORTC
+#define PC5_DDR			DDRC
+#define PC5_PWM			NULL
+#undef PC6
+#define PC6_PIN			PINC6
+#define PC6_RPORT		PINC
+#define PC6_WPORT		PORTC
+#define PC6_DDR			DDRC
+#define PC6_PWM			NULL
+#undef PC7
+#define PC7_PIN			PINC7
+#define PC7_RPORT		PINC
+#define PC7_WPORT		PORTC
+#define PC7_DDR			DDRC
+#define PC7_PWM			NULL
+
+#undef PD0
+#define PD0_PIN			PIND0
+#define PD0_RPORT		PIND
+#define PD0_WPORT		PORTD
+#define PD0_DDR			DDRD
+#define PD0_PWM			NULL
+#undef PD1
+#define PD1_PIN			PIND1
+#define PD1_RPORT		PIND
+#define PD1_WPORT		PORTD
+#define PD1_DDR			DDRD
+#define PD1_PWM			NULL
+#undef PD2
+#define PD2_PIN			PIND2
+#define PD2_RPORT		PIND
+#define PD2_WPORT		PORTD
+#define PD2_DDR			DDRD
+#define PD2_PWM			NULL
+#undef PD3
+#define PD3_PIN			PIND3
+#define PD3_RPORT		PIND
+#define PD3_WPORT		PORTD
+#define PD3_DDR			DDRD
+#define PD3_PWM			NULL
+#undef PD4
+#define PD4_PIN			PIND4
+#define PD4_RPORT		PIND
+#define PD4_WPORT		PORTD
+#define PD4_DDR			DDRD
+#define PD4_PWM			NULL
+#undef PD5
+#define PD5_PIN			PIND5
+#define PD5_RPORT		PIND
+#define PD5_WPORT		PORTD
+#define PD5_DDR			DDRD
+#define PD5_PWM			NULL
+#undef PD6
+#define PD6_PIN			PIND6
+#define PD6_RPORT		PIND
+#define PD6_WPORT		PORTD
+#define PD6_DDR			DDRD
+#define PD6_PWM			NULL
+#undef PD7
+#define PD7_PIN			PIND7
+#define PD7_RPORT		PIND
+#define PD7_WPORT		PORTD
+#define PD7_DDR			DDRD
+#define PD7_PWM			NULL
+
+#undef PE0
+#define PE0_PIN			PINE0
+#define PE0_RPORT		PINE
+#define PE0_WPORT		PORTE
+#define PE0_DDR			DDRE
+#define PE0_PWM			NULL
+#undef PE1
+#define PE1_PIN			PINE1
+#define PE1_RPORT		PINE
+#define PE1_WPORT		PORTE
+#define PE1_DDR			DDRE
+#define PE1_PWM			NULL
+#undef PE2
+#define PE2_PIN			PINE2
+#define PE2_RPORT		PINE
+#define PE2_WPORT		PORTE
+#define PE2_DDR			DDRE
+#define PE2_PWM			NULL
+#undef PE3
+#define PE3_PIN			PINE3
+#define PE3_RPORT		PINE
+#define PE3_WPORT		PORTE
+#define PE3_DDR			DDRE
+#define PE3_PWM			&OCR3AL
+#undef PE4
+#define PE4_PIN			PINE4
+#define PE4_RPORT		PINE
+#define PE4_WPORT		PORTE
+#define PE4_DDR			DDRE
+#define PE4_PWM			&OCR3BL
+#undef PE5
+#define PE5_PIN			PINE5
+#define PE5_RPORT		PINE
+#define PE5_WPORT		PORTE
+#define PE5_DDR			DDRE
+#define PE5_PWM			&OCR3CL
+#undef PE6
+#define PE6_PIN			PINE6
+#define PE6_RPORT		PINE
+#define PE6_WPORT		PORTE
+#define PE6_DDR			DDRE
+#define PE6_PWM			NULL
+#undef PE7
+#define PE7_PIN			PINE7
+#define PE7_RPORT		PINE
+#define PE7_WPORT		PORTE
+#define PE7_DDR			DDRE
+#define PE7_PWM			NULL
+
+#undef PF0
+#define PF0_PIN			PINF0
+#define PF0_RPORT		PINF
+#define PF0_WPORT		PORTF
+#define PF0_DDR			DDRF
+#define PF0_PWM			NULL
+#undef PF1
+#define PF1_PIN			PINF1
+#define PF1_RPORT		PINF
+#define PF1_WPORT		PORTF
+#define PF1_DDR			DDRF
+#define PF1_PWM			NULL
+#undef PF2
+#define PF2_PIN			PINF2
+#define PF2_RPORT		PINF
+#define PF2_WPORT		PORTF
+#define PF2_DDR			DDRF
+#define PF2_PWM			NULL
+#undef PF3
+#define PF3_PIN			PINF3
+#define PF3_RPORT		PINF
+#define PF3_WPORT		PORTF
+#define PF3_DDR			DDRF
+#define PF3_PWM			NULL
+#undef PF4
+#define PF4_PIN			PINF4
+#define PF4_RPORT		PINF
+#define PF4_WPORT		PORTF
+#define PF4_DDR			DDRF
+#define PF4_PWM			NULL
+#undef PF5
+#define PF5_PIN			PINF5
+#define PF5_RPORT		PINF
+#define PF5_WPORT		PORTF
+#define PF5_DDR			DDRF
+#define PF5_PWM			NULL
+#undef PF6
+#define PF6_PIN			PINF6
+#define PF6_RPORT		PINF
+#define PF6_WPORT		PORTF
+#define PF6_DDR			DDRF
+#define PF6_PWM			NULL
+#undef PF7
+#define PF7_PIN			PINF7
+#define PF7_RPORT		PINF
+#define PF7_WPORT		PORTF
+#define PF7_DDR			DDRF
+#define PF7_PWM			NULL
+
+#undef PG0
+#define PG0_PIN			PING0
+#define PG0_RPORT		PING
+#define PG0_WPORT		PORTG
+#define PG0_DDR			DDRG
+#define PG0_PWM			NULL
+#undef PG1
+#define PG1_PIN			PING1
+#define PG1_RPORT		PING
+#define PG1_WPORT		PORTG
+#define PG1_DDR			DDRG
+#define PG1_PWM			NULL
+#undef PG2
+#define PG2_PIN			PING2
+#define PG2_RPORT		PING
+#define PG2_WPORT		PORTG
+#define PG2_DDR			DDRG
+#define PG2_PWM			NULL
+#undef PG3
+#define PG3_PIN			PING3
+#define PG3_RPORT		PING
+#define PG3_WPORT		PORTG
+#define PG3_DDR			DDRG
+#define PG3_PWM			NULL
+#undef PG4
+#define PG4_PIN			PING4
+#define PG4_RPORT		PING
+#define PG4_WPORT		PORTG
+#define PG4_DDR			DDRG
+#define PG4_PWM			NULL
+#undef PG5
+#define PG5_PIN			PING5
+#define PG5_RPORT		PING
+#define PG5_WPORT		PORTG
+#define PG5_DDR			DDRG
+#define PG5_PWM			&OCR0B
+#undef PG6
+#define PG6_PIN			PING6
+#define PG6_RPORT		PING
+#define PG6_WPORT		PORTG
+#define PG6_DDR			DDRG
+#define PG6_PWM			NULL
+#undef PG7
+#define PG7_PIN			PING7
+#define PG7_RPORT		PING
+#define PG7_WPORT		PORTG
+#define PG7_DDR			DDRG
+#define PG7_PWM			NULL
+
+#undef PH0
+#define PH0_PIN			PINH0
+#define PH0_RPORT		PINH
+#define PH0_WPORT		PORTH
+#define PH0_DDR			DDRH
+#define PH0_PWM			NULL
+#undef PH1
+#define PH1_PIN			PINH1
+#define PH1_RPORT		PINH
+#define PH1_WPORT		PORTH
+#define PH1_DDR			DDRH
+#define PH1_PWM			NULL
+#undef PH2
+#define PH2_PIN			PINH2
+#define PH2_RPORT		PINH
+#define PH2_WPORT		PORTH
+#define PH2_DDR			DDRH
+#define PH2_PWM			NULL
+#undef PH3
+#define PH3_PIN			PINH3
+#define PH3_RPORT		PINH
+#define PH3_WPORT		PORTH
+#define PH3_DDR			DDRH
+#define PH3_PWM			&OCR4AL
+#undef PH4
+#define PH4_PIN			PINH4
+#define PH4_RPORT		PINH
+#define PH4_WPORT		PORTH
+#define PH4_DDR			DDRH
+#define PH4_PWM			&OCR4BL
+#undef PH5
+#define PH5_PIN			PINH5
+#define PH5_RPORT		PINH
+#define PH5_WPORT		PORTH
+#define PH5_DDR			DDRH
+#define PH5_PWM			&OCR4CL
+#undef PH6
+#define PH6_PIN			PINH6
+#define PH6_RPORT		PINH
+#define PH6_WPORT		PORTH
+#define PH6_DDR			DDRH
+#define PH6_PWM			&OCR2B
+#undef PH7
+#define PH7_PIN			PINH7
+#define PH7_RPORT		PINH
+#define PH7_WPORT		PORTH
+#define PH7_DDR			DDRH
+#define PH7_PWM			NULL
+
+#undef PJ0
+#define PJ0_PIN			PINJ0
+#define PJ0_RPORT		PINJ
+#define PJ0_WPORT		PORTJ
+#define PJ0_DDR			DDRJ
+#define PJ0_PWM			NULL
+#undef PJ1
+#define PJ1_PIN			PINJ1
+#define PJ1_RPORT		PINJ
+#define PJ1_WPORT		PORTJ
+#define PJ1_DDR			DDRJ
+#define PJ1_PWM			NULL
+#undef PJ2
+#define PJ2_PIN			PINJ2
+#define PJ2_RPORT		PINJ
+#define PJ2_WPORT		PORTJ
+#define PJ2_DDR			DDRJ
+#define PJ2_PWM			NULL
+#undef PJ3
+#define PJ3_PIN			PINJ3
+#define PJ3_RPORT		PINJ
+#define PJ3_WPORT		PORTJ
+#define PJ3_DDR			DDRJ
+#define PJ3_PWM			NULL
+#undef PJ4
+#define PJ4_PIN			PINJ4
+#define PJ4_RPORT		PINJ
+#define PJ4_WPORT		PORTJ
+#define PJ4_DDR			DDRJ
+#define PJ4_PWM			NULL
+#undef PJ5
+#define PJ5_PIN			PINJ5
+#define PJ5_RPORT		PINJ
+#define PJ5_WPORT		PORTJ
+#define PJ5_DDR			DDRJ
+#define PJ5_PWM			NULL
+#undef PJ6
+#define PJ6_PIN			PINJ6
+#define PJ6_RPORT		PINJ
+#define PJ6_WPORT		PORTJ
+#define PJ6_DDR			DDRJ
+#define PJ6_PWM			NULL
+#undef PJ7
+#define PJ7_PIN			PINJ7
+#define PJ7_RPORT		PINJ
+#define PJ7_WPORT		PORTJ
+#define PJ7_DDR			DDRJ
+#define PJ7_PWM			NULL
+
+#undef PK0
+#define PK0_PIN			PINK0
+#define PK0_RPORT		PINK
+#define PK0_WPORT		PORTK
+#define PK0_DDR			DDRK
+#define PK0_PWM			NULL
+#undef PK1
+#define PK1_PIN			PINK1
+#define PK1_RPORT		PINK
+#define PK1_WPORT		PORTK
+#define PK1_DDR			DDRK
+#define PK1_PWM			NULL
+#undef PK2
+#define PK2_PIN			PINK2
+#define PK2_RPORT		PINK
+#define PK2_WPORT		PORTK
+#define PK2_DDR			DDRK
+#define PK2_PWM			NULL
+#undef PK3
+#define PK3_PIN			PINK3
+#define PK3_RPORT		PINK
+#define PK3_WPORT		PORTK
+#define PK3_DDR			DDRK
+#define PK3_PWM			NULL
+#undef PK4
+#define PK4_PIN			PINK4
+#define PK4_RPORT		PINK
+#define PK4_WPORT		PORTK
+#define PK4_DDR			DDRK
+#define PK4_PWM			NULL
+#undef PK5
+#define PK5_PIN			PINK5
+#define PK5_RPORT		PINK
+#define PK5_WPORT		PORTK
+#define PK5_DDR			DDRK
+#define PK5_PWM			NULL
+#undef PK6
+#define PK6_PIN			PINK6
+#define PK6_RPORT		PINK
+#define PK6_WPORT		PORTK
+#define PK6_DDR			DDRK
+#define PK6_PWM			NULL
+#undef PK7
+#define PK7_PIN			PINK7
+#define PK7_RPORT		PINK
+#define PK7_WPORT		PORTK
+#define PK7_DDR			DDRK
+#define PK7_PWM			NULL
+
+#undef PL0
+#define PL0_PIN			PINL0
+#define PL0_RPORT		PINL
+#define PL0_WPORT		PORTL
+#define PL0_DDR			DDRL
+#define PL0_PWM			NULL
+#undef PL1
+#define PL1_PIN			PINL1
+#define PL1_RPORT		PINL
+#define PL1_WPORT		PORTL
+#define PL1_DDR			DDRL
+#define PL1_PWM			NULL
+#undef PL2
+#define PL2_PIN			PINL2
+#define PL2_RPORT		PINL
+#define PL2_WPORT		PORTL
+#define PL2_DDR			DDRL
+#define PL2_PWM			NULL
+#undef PL3
+#define PL3_PIN			PINL3
+#define PL3_RPORT		PINL
+#define PL3_WPORT		PORTL
+#define PL3_DDR			DDRL
+#define PL3_PWM			&OCR5AL
+#undef PL4
+#define PL4_PIN			PINL4
+#define PL4_RPORT		PINL
+#define PL4_WPORT		PORTL
+#define PL4_DDR			DDRL
+#define PL4_PWM			&OCR5BL
+#undef PL5
+#define PL5_PIN			PINL5
+#define PL5_RPORT		PINL
+#define PL5_WPORT		PORTL
+#define PL5_DDR			DDRL
+#define PL5_PWM			&OCR5CL
+#undef PL6
+#define PL6_PIN			PINL6
+#define PL6_RPORT		PINL
+#define PL6_WPORT		PORTL
+#define PL6_DDR			DDRL
+#define PL6_PWM			NULL
+#undef PL7
+#define PL7_PIN			PINL7
+#define PL7_RPORT		PINL
+#define PL7_WPORT		PORTL
+#define PL7_DDR			DDRL
+#define PL7_PWM			NULL
+
+#endif
+
+#ifndef	DIO0_PIN
+#error pins for this chip not defined in arduino.h! If you write an appropriate pin definition and have this firmware work on your chip, please submit a pull request
+#endif
+
+#endif /* _FASTIO_ARDUINO_H */
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "GCodeExecute.h"
+
+void GCodeExecuteClass::Init(vector<String>* gCodeQueue)
+{
+	this->GCodeQueue = gCodeQueue;
+	ResetValue();
+	IsRunning = false;
+}
+
+void GCodeExecuteClass::Run()
+{
+	WhenFinishMove();
+
+	if (GCodeQueue->size() == 0 || IsRunning == true)
+		return;
+
+	String GcodeInProcessing = GCodeQueue->operator[](0);
+	vector<KeyValue> keyValues = getKeyValues(GcodeInProcessing);
+
+	for (uint8_t i = 1; i < keyValues.size(); i++)
+	{
+		switch (keyValues[i].Key)
+		{
+		case 'X':
+			X = keyValues[i].Value;
+			break;
+		case 'Y':
+			Y = keyValues[i].Value;
+			break;
+		case 'Z':
+			Z = keyValues[i].Value;
+			break;
+		case 'E':
+			E = keyValues[i].Value;
+			break;
+		case 'S':
+			S = keyValues[i].Value;
+			break;
+		case 'A':
+			A = keyValues[i].Value;
+			break;
+		case 'I':
+			I = keyValues[i].Value;
+			break;
+		case 'J':
+			J = keyValues[i].Value;
+			break;
+		case 'F':
+			F = keyValues[i].Value;
+			break;
+		case 'P':
+			P = keyValues[i].Value;
+			break;
+		case 'R':
+			R = keyValues[i].Value;
+			break;
+		case 'Q':
+			Q = keyValues[i].Value;
+			break;
+		case 'W':
+			W = keyValues[i].Value;
+			break;
+		default:
+			break;
+		}
+	}
+
+	checkAndRunFunction(keyValues[0]);
+
+	GCodeQueue->erase(GCodeQueue->begin());
+	IsRunning = true;
+}
+
+void GCodeExecuteClass::WhenFinishMove()
+{
+	if (Stepper.GetStateMotor() == true)
+	{
+		if (IsRunning == true)
+		{
+			if (Data.IsExecutedGcode == true)
+			{
+				SERIAL_PORT.println("Ok");	
+			}
+			else
+			{
+				if (Tool.IsWait == true)
+				{
+					if (!Tool.Wait())
+					{
+						return;
+					}
+					SERIAL_PORT.println("Ok");
+					Tool.IsWait = false;
+				}
+				else
+				{
+					SERIAL_PORT.println("Unknown");
+				}				
+			}
+			ConnectionState.ResetTimeDisconnect();
+			IsRunning = false;
+			Data.IsExecutedGcode = false;
+		}
+	}
+}
+
+void GCodeExecuteClass::checkAndRunFunction(KeyValue keyValue)
+{
+	switch (keyValue.Key)
+	{
+	case 'G':
+		switch ((int)keyValue.Value)
+		{
+		case 0:
+			if (F != NULL_NUMBER) Planner.SetVelocity(F);
+			if (X == NULL_NUMBER) X = Data.CurrentPoint.X;
+			if (Y == NULL_NUMBER) Y = Data.CurrentPoint.Y;
+			if (Z == NULL_NUMBER) Z = Data.CurrentPoint.Z;
+			if (W == NULL_NUMBER) W = Data.WPosition;
+			Motion.G0(X, Y, Z, W);		
+			break;
+		case 1:
+			if (F != NULL_NUMBER) Planner.SetVelocity(F);
+			if (X == NULL_NUMBER) X = Data.CurrentPoint.X;
+			if (Y == NULL_NUMBER) Y = Data.CurrentPoint.Y;
+			if (Z == NULL_NUMBER) Z = Data.CurrentPoint.Z;
+			if (W == NULL_NUMBER) W = Data.WPosition;
+			Motion.G1(X, Y, Z, W);
+			if (S >= 0 && S <= 255) Control.M03(S);
+			break;
+		case 2:
+			if (I == NULL_NUMBER) break;
+			if (J == NULL_NUMBER) break;
+			if (F != NULL_NUMBER) Planner.SetVelocity(F);
+			if (X == NULL_NUMBER) X = Data.CurrentPoint.X;
+			if (Y == NULL_NUMBER) Y = Data.CurrentPoint.Y;
+			if (W == NULL_NUMBER) W = Data.WPosition;
+			Motion.G2(I, J, X, Y, W);
+			if (S >= 0 && S <= 255) Control.M03(S);
+			break;
+		case 3:
+			if (I == NULL_NUMBER) break;
+			if (J == NULL_NUMBER) break;
+			if (F != NULL_NUMBER) Planner.SetVelocity(F);
+			if (X == NULL_NUMBER) X = Data.CurrentPoint.X;
+			if (Y == NULL_NUMBER) Y = Data.CurrentPoint.Y;
+			if (W == NULL_NUMBER) W = Data.WPosition;
+			Motion.G3(I, J, X, Y, W);
+			if (S >= 0 && S <= 255) Control.M03(S);
+			break;
+		case 4:
+			if (P == NULL_NUMBER) break;
+			Motion.G4(P);
+			break;
+		case 5:
+			if (I == NULL_NUMBER) break;
+			if (J == NULL_NUMBER) break;
+			if (P == NULL_NUMBER) break;
+			if (Q == NULL_NUMBER) break;
+			if (F != NULL_NUMBER) Planner.SetVelocity(F);
+			if (X == NULL_NUMBER) X = Data.CurrentPoint.X;
+			if (Y == NULL_NUMBER) Y = Data.CurrentPoint.Y;
+			if (W == NULL_NUMBER) W = Data.WPosition;
+			Motion.G5(I, J, P, Q, X, Y, W);
+			if (S >= 0 && S <= 255) Control.M03(S);
+			break;
+		case 6:
+			if (F != NULL_NUMBER) Planner.SetVelocity(F);
+			if (X == NULL_NUMBER) X = Data.CurrentPoint.X;
+			if (Y == NULL_NUMBER) Y = Data.CurrentPoint.Y;
+			if (Z == NULL_NUMBER) Z = Data.CurrentPoint.Z;
+			if (W == NULL_NUMBER) W = Data.WPosition;
+			if (P == NULL_NUMBER) break;
+			Motion.G6(X, Y, Z, P);
+			if (S >= 0 && S <= 255) Control.M03(S);
+			break;
+		case 28:
+			Motion.G28();
+			break;
+		case 90:
+			Control.G90();
+			break;
+		case 91:
+			Control.G91();
+			break;
+		case 93:
+			Control.G93();
+			break;
+		default:
+			break;
+		}
+		break;
+	case 'M':
+		switch ((int)keyValue.Value)
+		{
+		case 3:
+			if (S == NULL_NUMBER) S = 255;
+			Control.M03(S);
+			break;
+		case 4:
+			if (S == NULL_NUMBER) S = 255;
+			Control.M04(S);
+			break;
+		case 5:
+			Control.M05();
+			break;
+		case 84:
+			Control.M84();
+			break;
+		case 104:
+			if (S > 240) S = 240;
+			Control.M104(S);
+			break;
+		case  105:
+			Control.M105();
+			break;
+		case 109:
+			Control.M109();
+			break;
+		case 203:
+			Control.M203(S);
+			break;
+		case 204:
+			Control.M204(A);
+			break;
+		case 206:
+			Control.M206(Z);
+			break;
+		case 360:
+			if (E > USE_CUSTOM) break;
+			Control.M360(E);
+			break;
+		case 361:
+			if (P == NULL_NUMBER) break;
+			Control.M361(P);
+			break;
+		case 362:
+			if (P == NULL_NUMBER) break;
+			Control.M362(P);
+			break;
+		case 500:
+			Control.M500();
+			break;
+		case 501:
+			Control.M501();
+			break;
+		case 502:
+			Control.M502();
+			break;
+		default:
+			break;
+		}
+		break;
+	default:
+		break;
+	}
+	ResetValue();
+}
+
+vector<KeyValue> GCodeExecuteClass::getKeyValues(String code)
+{
+	String splitWord = "";
+	vector<KeyValue> keyValues;
+	code += " ";
+	for (uint16_t i = 0; i < code.length(); i++)
+	{
+		if (code[i] == ' ')
+		{
+			if (splitWord == "")
+				continue;
+			KeyValue keyValue;
+			keyValue.Key = splitWord[0];
+			keyValue.Value = splitWord.substring(1).toFloat();
+			keyValues.push_back(keyValue);
+			splitWord = "";
+			continue;
+		}
+		splitWord += String(code[i]);
+	}
+	return keyValues;
+}
+
+void GCodeExecuteClass::ResetValue()
+{
+	X = NULL_NUMBER;
+	Y = NULL_NUMBER;
+	Z = NULL_NUMBER;
+	E = NULL_NUMBER;
+	S = NULL_NUMBER;
+	A = NULL_NUMBER;
+	I = NULL_NUMBER;
+	J = NULL_NUMBER;
+	F = NULL_NUMBER;
+	P = NULL_NUMBER;
+	R = NULL_NUMBER;
+	Q = NULL_NUMBER;
+	W = NULL_NUMBER;
+}
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+// GCodeExecute.h
+
+#ifndef _GCODEEXECUTE_h
+#define _GCODEEXECUTE_h
+
+#if defined(ARDUINO) && ARDUINO >= 100
+	#include "arduino.h"
+#else
+	#include "WProgram.h"
+#endif
+
+#include <ArduinoSTL.h>
+#include <vector>
+#include "enum.h"
+#include "Motion.h"
+#include "Control.h"
+
+#define NULL_NUMBER 98765
+
+using namespace std;
+
+class KeyValue
+{
+public:
+	char Key;
+	float Value;
+};
+
+class NoArgumentFunction
+{
+public:
+	String Code;
+	void(*Function)();
+};
+
+class GCodeExecuteClass
+{
+public:
+	void Init(vector<String>*);
+	void Run();
+	void WhenFinishMove();
+
+	vector<String>* GCodeQueue;
+	bool IsRunning;
+
+	float X, Y, Z, E, S, A, I, J, F, P, R, Q, W;
+private:
+	vector<KeyValue> getKeyValues(String code);
+	void checkAndRunFunction(KeyValue keyValue);
+	void ResetValue();
+	vector <NoArgumentFunction> NoArgumentFunctions;
+};
+
+
+#endif
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "GCodeReceiver.h"
+
+void GCodeReceiverClass::Init(vector<String>* gCodeQueue, HardwareSerial* serial, unsigned long baudrate)
+{
+	ReceiveSerial = serial;
+	ReceiveSerial->begin(baudrate);
+	receiveString.reserve(100);
+
+	isStringComplete = false;
+	receiveString = "";
+
+	this->GCodeQueue = gCodeQueue;
+}
+
+void GCodeReceiverClass::Execute()
+{
+	while (ReceiveSerial->available())
+	{
+		char inChar = (char)ReceiveSerial->read();
+
+		if (inChar == '\n')
+		{
+			isStringComplete = true;
+			break;
+		}
+
+		if (inChar != '\r')
+		{
+			receiveString += inChar;
+		}
+	}
+
+	if (!isStringComplete)
+	{
+		if (receiveString.length() > 70)
+		{
+			receiveString = "";
+		}
+		
+		return;
+	}
+		
+	if (receiveString[0] == 'M' || receiveString[0] == 'G')
+	{
+		GCodeQueue->push_back(receiveString);
+		receiveString = "";
+		isStringComplete = false;
+		return;
+	}
+
+	int index = receiveString.indexOf(':');
+
+	if (index == -1)
+	{
+		if (receiveString == "IsDelta") ConnectionState.Connect();
+		else if (receiveString == "Disconnect") ConnectionState.Disconnect();
+		else if (receiveString == "Position")
+		{
+			Serial.print(Data.CurrentPoint.X);
+			Serial.print(",");
+			Serial.print(Data.CurrentPoint.Y);
+			Serial.print(",");
+			Serial.println(Data.CurrentPoint.Z);
+		}
+		else if (receiveString == "SAVEWIFI") {
+			WifiSettings.Save();
+			Serial.println("Ok");	
+		}
+		else if (receiveString == "SAVEIP") WifiSettings.SaveIP();
+		else if (receiveString == "IP") WifiSettings.IP();
+		else if (receiveString == "gSsid") WifiSettings.GetSsid();
+		else if (receiveString == "gPswd") WifiSettings.GetPswd();
+		else if (receiveString == "Temp")
+		{
+			Temperature.GetTemperature();
+			Serial.print("T:");
+			Serial.println(Temperature.CurrentTemperature);
+		}
+	}
+	else
+	{
+		String keyString = receiveString.substring(0, index);
+		String valueString = receiveString.substring(index + 1);
+		if (keyString == "SSID") {
+			WifiSettings.SSIDWifi = valueString;
+			Serial.println("Ok");
+		}
+		else if (keyString == "PSWD") {
+			WifiSettings.PSWDWifi = valueString;
+			Serial.println("Ok");
+		}
+		else if (keyString == "ESPIP") 
+		{
+			WifiSettings.IPWifi = valueString;
+			Serial.println(valueString);
+		}
+	}
+
+	receiveString = "";
+	isStringComplete = false;
+}
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+// GCodeReceiver.h
+
+#ifndef _GCODERECEIVER_h
+#define _GCODERECEIVER_h
+
+#if defined(ARDUINO) && ARDUINO >= 100
+	#include "arduino.h"
+#else
+	#include "WProgram.h"
+#endif
+
+#include <ArduinoSTL.h>
+#include <vector>
+#include "ConnectionState.h"
+#include "WifiSettings.h"
+#include "Constants.h"
+#include "Temperature.h"
+
+using namespace std;
+
+class GCodeReceiverClass
+{
+public:
+	void Init(vector<String>* gCodeQueue, HardwareSerial* serial, unsigned long baudrate);
+
+	void Execute();
+
+	HardwareSerial* ReceiveSerial;
+	unsigned long Baudrate;
+
+	vector<String>* GCodeQueue;
+
+private:
+	
+	String receiveString;
+	bool isStringComplete;
+};
+
+#endif
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+#pragma once
+//robot geometry
+//
+//
+//
+//                                          / \             RD_RF    
+//                                         /   \             /
+//                                        /     \ Theta2    /                                   ^ Y   ^ Z
+//                                       /       \ ________/____                                |    /
+//                           Theta3     /         \            /                                |   /
+//                                     /     *O    \          /                                 |  /
+//                        RD_F_______ /             \        /                                  | /
+//            ^                      /               \      /                                 __|/_____________>
+//            |                      -----------------     /                                    |O             X
+//            |                           Theta1          /
+//            |                                          /_______RD_RE
+//            |                                         /
+//            |                                        /
+//            |                                       /
+//            |                                 / \  /
+//            |                      RD_E_____ /   \/
+//     RD_B   |                               /  *  \     RD_U
+//            |                               -------    /
+//            |                                  |      /
+//            |                     RD_W________ |_____/_
+//            |                                  |
+//            |                                  | _______RD_V
+//            |                                  ^
+//____________|__________________________________________________________________________________________________________
+
+#ifdef DELTA_X_PULY_S
+#define DEFAULT_RD_F	259.04   // SB			//size S  258.64 + 0.4
+#define DEFAULT_RD_E	120.0	// SP = RD_E / 2
+#define DEFAULT_RD_RF	130.0	// L
+#define DEFAULT_RD_RE	315.0   // l
+
+#define DEFAULT_RD_W	0.0
+#define DEFAULT_RD_U	0.0
+#define DEFAULT_RD_V	0.0
+
+#define DEFAULT_MOVING_AREA_X		170
+#define DEFAULT_MOVING_AREA_Y		170
+#define DEFAULT_MOVING_AREA_Z	    402
+
+#define DEFAULT_MOVING_AREA_LARGEST_DIAMETER	170			//mm
+
+#define THETA1_HOME_POSITION -38.5				//deg -41.2	
+#define THETA2_HOME_POSITION -38.5
+#define THETA3_HOME_POSITION -38.5
+
+#define THETA1_STEPS_PER_2PI  9600				//200*16*3
+#define THETA2_STEPS_PER_2PI  9600
+#define THETA3_STEPS_PER_2PI  9600
+#endif // DELTA_X_PULY_S
+
+#ifdef DELTA_X_V2
+#define DEFAULT_RD_F	260.0   // SB			//size S  258.64 + 0.4
+#define DEFAULT_RD_E	120.0	// SP = RD_E / 2
+#define DEFAULT_RD_RF	120.0	// L
+#define DEFAULT_RD_RE	305.0   // l
+
+#define DEFAULT_RD_W	0.0
+#define DEFAULT_RD_U	0.0
+#define DEFAULT_RD_V	0.0
+
+#define DEFAULT_MOVING_AREA_X		170
+#define DEFAULT_MOVING_AREA_Y		170
+#define DEFAULT_MOVING_AREA_Z	    402
+
+#define DEFAULT_MOVING_AREA_LARGEST_DIAMETER	170			//mm
+
+#define THETA1_HOME_POSITION -34.25				//deg -41.2	
+#define THETA2_HOME_POSITION -34.25
+#define THETA3_HOME_POSITION -34.25
+
+#define THETA1_STEPS_PER_2PI  9600				//200*16*3
+#define THETA2_STEPS_PER_2PI  9600
+#define THETA3_STEPS_PER_2PI  9600
+
+#endif
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "Motion.h"
+
+void MotionClass::init()
+{
+	Angle homeAngle;
+
+	homeAngle.Theta1 = THETA1_HOME_POSITION;
+	homeAngle.Theta2 = THETA2_HOME_POSITION;
+	homeAngle.Theta3 = THETA3_HOME_POSITION;
+	DeltaKinematics.ForwardKinematicsCalculations(homeAngle, Data.HomePosition);
+	//SetHomePosition();
+}
+
+void MotionClass::G0(float xPos, float yPos, float zPos, float ewPos)
+{
+	Point pointBuffer = Tool.ConvertToPoint(xPos, yPos, zPos);
+
+	if (Data.End_Effector != USE_PRINTER)
+	{
+		if (ewPos != Data.WPosition)
+		{
+			MultiServo.AddAngle(AXIS_4, ewPos);
+			Data.WPosition = ewPos;
+			MultiServo.Running();
+			Data.IsExecutedGcode = true;
+		}
+	}
+
+	if (Tool.CheckingDesiredPoint(pointBuffer) == false) return;
+	
+	if (LinearInterpolation() == false) return;
+
+	Data.IsExecutedGcode = true;
+	Stepper.Running();
+	NumberSegment = 0;
+}
+
+void MotionClass::G1(float xPos, float yPos, float zPos, float ewPos)
+{
+	Point pointBuffer = Tool.ConvertToPoint(xPos, yPos, zPos);
+
+	if (Data.End_Effector != USE_PRINTER)
+	{
+		if (ewPos != Data.WPosition)
+		{
+			MultiServo.AddAngle(AXIS_4, ewPos);
+			Data.WPosition = ewPos;
+			MultiServo.Running();
+			Data.IsExecutedGcode = true;
+		}
+	}
+
+	if (Tool.CheckingDesiredPoint(pointBuffer) == false && Data.End_Effector != USE_PRINTER) return;
+
+	if (LinearInterpolation() == false && Data.End_Effector != USE_PRINTER) return;
+
+	if (Data.End_Effector == USE_PRINTER)
+	{
+		float offset = ewPos - Data.ExtrustionPosition;
+
+		if (offset < 0.01 &&  offset > -0.01)
+		{
+			offset = 0;
+		}
+
+		Planner.AddExtrustionSegment(offset);
+		Data.IsExecutedGcode = true;
+		Data.ExtrustionPosition = ewPos;
+	}
+
+	Data.IsExecutedGcode = true;
+	Stepper.Running();
+	NumberSegment = 0;
+}
+
+void MotionClass::G2(float i, float j, float xPos, float yPos, float wPos)
+{
+	Point pointBuffer = Tool.ConvertToPoint(xPos, yPos, Data.CurrentPoint.Z);
+
+	if (wPos != Data.WPosition)
+	{
+		MultiServo.AddAngle(AXIS_4, wPos);
+		Data.WPosition = wPos;
+		MultiServo.Running();
+		Data.IsExecutedGcode = true;
+	}
+
+	if (Tool.CheckingDesiredPoint(pointBuffer) == false) return;
+	
+	if (CircleInterpolation(i, j, 0) == false) return;
+
+	Data.IsExecutedGcode = true;
+	Stepper.Running();
+	NumberSegment = 0;
+}
+
+void MotionClass::G3(float i, float j, float xPos, float yPos, float wPos)
+{
+	Point pointBuffer = Tool.ConvertToPoint(xPos, yPos, Data.CurrentPoint.Z);
+
+	if (wPos != Data.WPosition)
+	{
+		MultiServo.AddAngle(AXIS_4, wPos);
+		Data.WPosition = wPos;
+		MultiServo.Running();
+		Data.IsExecutedGcode = true;
+	}
+
+	if (Tool.CheckingDesiredPoint(pointBuffer) == false) return;
+
+	if (CircleInterpolation(i, j, 1) == false) return;
+
+	Data.IsExecutedGcode = true;
+	Stepper.Running();
+	NumberSegment = 0;
+}
+
+void MotionClass::G4(float p)
+{
+	Tool.SetTimeDelay(p);
+}
+
+void MotionClass::G5(float i, float j, float p, float q, float x, float y, float wPos)
+{
+	Point pointBuffer = Tool.ConvertToPoint(x, y, Data.CurrentPoint.Z);
+
+	if (wPos != Data.WPosition)
+	{
+		MultiServo.AddAngle(AXIS_4, wPos);
+		Data.WPosition = wPos;
+		MultiServo.Running();
+		Data.IsExecutedGcode = true;
+	}
+
+	if (Tool.CheckingDesiredPoint(pointBuffer) == false) return;
+	Point p1, p2;
+
+	p1.X = i;
+	p1.Y = j;
+	p1.Z = Data.CurrentPoint.Z;
+
+	p2.X = p;
+	p2.Y = q;
+	p2.Z = Data.CurrentPoint.Z;
+
+	if (Bezier4PointInterpolation(p1, p2) == false) return;
+
+	Data.IsExecutedGcode = true;
+	Stepper.Running();
+}
+
+void MotionClass::G6(float angle1, float angle2, float angle3, float distance)
+{
+	Data.IsExecutedGcode = true;
+
+	Angle nextAngle;
+
+	nextAngle.Theta1 = angle1;
+	nextAngle.Theta2 = angle2;
+	nextAngle.Theta3 = angle3;
+
+	UploadSegment(Data.CurrentAngle, nextAngle, distance, 1);
+
+	Data.CurrentAngle = nextAngle;
+
+	Stepper.Running();
+}
+
+void MotionClass::G28()
+{
+	MultiServo.AddAngle(AXIS_4, 85);
+
+	Planner.AddHomeSegment();
+	Data.IsExecutedGcode = true;
+
+	SetHomePosition();
+
+	Stepper.EnableStepper();
+	MultiServo.Running();
+	Stepper.Homing();
+}
+
+bool MotionClass::LinearInterpolation()
+{
+	float distance2Point = Tool.CalDistance2Point(Data.CurrentPoint, Data.DesiredPoint);
+
+	if (distance2Point == 0)
+	{
+		Data.IsExecutedGcode = true;
+		return false;
+	}
+
+	Angle angle_;
+	DeltaKinematics.InverseKinematicsCalculations(Data.DesiredPoint, angle_);
+
+	if (!Tool.CheckingDesiredAngle(angle_))
+	{
+		//Data.IsExecutedGcode = true;
+		return false;
+	}
+	
+	NumberSegment = floorf(distance2Point / Data.MMPerLinearSegment);
+
+	if (NumberSegment < 1)
+		NumberSegment = 1;
+
+	float tbuffer;
+	Angle lastAngle = Data.CurrentAngle;
+	Angle currentAngle;
+
+	float mm_per_seg = distance2Point / NumberSegment;
+
+	for (uint16_t i = 1; i <= NumberSegment; i++)
+	{
+		tbuffer = (float)i / NumberSegment;
+		Point pointBuffer = Tool.GetPointInLine(Data.CurrentPoint, Data.DesiredPoint, tbuffer);
+		DeltaKinematics.InverseKinematicsCalculations(pointBuffer, currentAngle);
+
+		UploadSegment(lastAngle, currentAngle, mm_per_seg, i - 1);
+		lastAngle = currentAngle;
+	}
+
+	Data.CurrentPoint = Data.DesiredPoint;
+	Data.CurrentAngle = currentAngle;
+
+	return true;
+}
+
+bool MotionClass::CircleInterpolation(float i, float j, bool clockwise)
+{
+	if (i == 0 && j == 0)
+	{
+		Data.IsExecutedGcode = true;
+		return false;
+	}	
+
+	float o_x = Data.CurrentPoint.X + i,
+		o_y = Data.CurrentPoint.Y + j,
+		radius = sqrt(pow(i, 2) + pow(j, 2)),
+		angle_Current, angle_Desired;
+
+	angle_Current = acosf(-i / radius);
+	if (j > 0)
+		angle_Current = -angle_Current;
+
+	angle_Desired = acosf((Data.DesiredPoint.X - o_x) / radius);
+	if (Data.DesiredPoint.Y - o_y <= 0)
+		angle_Desired = -angle_Desired;
+
+	float angular_travel = angle_Desired - angle_Current;
+	if (angular_travel < 0) angular_travel += 2.0 * PI;
+	if (clockwise) angular_travel -= 2.0 * PI;
+
+	if (angular_travel > -0.01 && angular_travel < 0.01)
+		angular_travel = 0;
+/*
+	if (angular_travel == 0 && Data.CurrentPoint.X == Data.DesiredPoint.X && Data.CurrentPoint.Y == Data.DesiredPoint.Y)
+	{
+		if (clockwise)
+		{
+			angular_travel = -2.0 * PI;
+		}
+		else
+		{
+			angular_travel = 2.0 * PI;
+		}
+	}
+*/
+	if (angular_travel == 0 && abs(Data.CurrentPoint.X - Data.DesiredPoint.X) < 0.4 && abs(Data.CurrentPoint.Y - Data.DesiredPoint.Y) < 0.4)
+	{
+		if (clockwise)
+		{
+			angular_travel = -2.0 * PI;
+		}
+		else
+		{
+			angular_travel = 2.0 * PI;
+		}
+	}
+	
+	float flat_mm = radius * abs(angular_travel);
+	
+	NumberSegment = floorf(flat_mm / Data.MMPerArcSegment);
+
+	if (NumberSegment < 7 && NumberSegment > 3)
+	{
+		NumberSegment = floorf(flat_mm * 2 / Data.MMPerArcSegment);
+	}
+	else if (NumberSegment <= 3)
+	{
+		NumberSegment = floorf(flat_mm * 4 / Data.MMPerArcSegment);
+	}
+
+	if (NumberSegment < 7)
+	{
+		return false;
+	}
+	
+	float theta_per_segment = angular_travel / NumberSegment;
+	float mm_per_seg = flat_mm / NumberSegment;
+
+	Angle lastAngle = Data.CurrentAngle;
+	Angle currentAngle;
+
+	Point endPoindInCircle = Tool.GetPointInCircle(o_x, o_y, radius, angle_Current + angular_travel);
+    float distance2Point = Tool.CalDistance2Point(endPoindInCircle, Data.DesiredPoint);
+
+	if (distance2Point > 0.5)
+	{
+		return false;
+	}
+
+	for (uint16_t i = 1; i < NumberSegment; i++)
+	{
+		Point pointBuffer = Tool.GetPointInCircle(o_x, o_y, radius, angle_Current + (float)i * theta_per_segment);
+
+		if (!DeltaKinematics.InverseKinematicsCalculations(pointBuffer, currentAngle)) return false;
+		UploadSegment(lastAngle, currentAngle, mm_per_seg, i - 1);
+		lastAngle = currentAngle;
+
+	}
+
+	if (!DeltaKinematics.InverseKinematicsCalculations(Data.DesiredPoint, currentAngle)) return false;
+	UploadSegment(lastAngle, currentAngle, mm_per_seg, NumberSegment - 1);
+	Data.CurrentPoint = Data.DesiredPoint;
+	Data.CurrentAngle = currentAngle;
+
+	return true;
+}
+
+bool MotionClass::CircleInterpolation(float r, bool clockwise)
+{
+	return true;
+}
+
+bool MotionClass::Bezier4PointInterpolation(Point p1, Point p2)
+{
+	if (Tool.CheckFuplicatione(p1, p2))
+		return false;
+
+	float tbuffer = 1.0 / NUMBER_PER_BEZIER_SEGMENT;
+	float distanceBuffer;
+
+	Angle lastAngle = Data.CurrentAngle;
+	Angle currentAngle;
+
+	Point lastPoint = Data.CurrentPoint;
+
+	for (uint16_t i = 1; i <= NUMBER_PER_BEZIER_SEGMENT; i++)
+	{
+		Point a = Tool.GetPointInLine(Data.CurrentPoint, p1, i * tbuffer);
+		Point b = Tool.GetPointInLine(p1, p2, i * tbuffer);
+		Point c = Tool.GetPointInLine(p2, Data.DesiredPoint, i * tbuffer);
+
+		Point d = Tool.GetPointInLine(a, b, i * tbuffer);
+		Point e = Tool.GetPointInLine(b, c, i * tbuffer);
+
+		Point f = Tool.GetPointInLine(d, e, i * tbuffer);
+
+		if (!DeltaKinematics.InverseKinematicsCalculations(f, currentAngle)) return false;
+
+		distanceBuffer = Tool.CalDistance2Point(f, lastPoint);
+		UploadSegment(lastAngle, currentAngle, distanceBuffer, i - 1);
+
+		lastPoint = f;
+		lastAngle = currentAngle;
+	}
+
+	Data.CurrentPoint = Data.DesiredPoint;
+	Data.CurrentAngle = currentAngle;
+
+	return true;
+}
+
+void MotionClass::UploadSegment(Angle angle1, Angle angle2, float distance, uint8_t index)
+{
+	float offset[3];
+	offset[0] = angle2.Theta1 - angle1.Theta1;
+	offset[1] = angle2.Theta2 - angle1.Theta2;
+	offset[2] = angle2.Theta3 - angle1.Theta3;
+
+	if (NumberSegment == 1)
+	{
+		Planner.AddChangeSegment(offset, distance);
+	}
+	else if (index == 0)
+	{
+		Planner.AddBeginSegment(offset, distance);
+	}
+	else if (index == (NumberSegment - 1))
+	{
+		Planner.AddEndSegment(offset, distance);
+	}
+	else
+	{
+		Planner.AddFixedSegment(offset, distance);
+	}
+}
+
+void MotionClass::SetHomePosition()
+{
+	Angle homeAngle;
+
+	homeAngle.Theta1 = THETA1_HOME_POSITION;
+	homeAngle.Theta2 = THETA2_HOME_POSITION;
+	homeAngle.Theta3 = THETA3_HOME_POSITION;
+
+	Data.DesiredPoint = Data.HomePosition;
+	Data.CurrentPoint = Data.HomePosition;
+	Data.CurrentAngle = homeAngle;
+	Data.WPosition = 85;
+}
+
+MotionClass Motion;
+
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+// Motion.h
+
+#ifndef _MOTION_h
+#define _MOTION_h
+
+#if defined(ARDUINO) && ARDUINO >= 100
+	#include "arduino.h"
+#else
+	#include "WProgram.h"
+#endif
+
+#include "Constants.h"
+#include "Tool.h"
+#include "DeltaKinematics.h"
+#include "Planner.h"
+#include "Stepper.h"
+#include "MultiServo.h"
+//#include "GCodeReceiver.h"
+
+class MotionClass
+{
+ protected:
+
+
+ public:
+	void init();
+	void G0(float xPos, float yPos, float zPos, float ewPos);
+	void G1(float xPos, float yPos, float zPos, float ewPos);
+	void G2(float i, float j, float xPos, float yPos, float wPos);
+	void G3(float i, float j, float xPos, float yPos, float wPos);
+	void G4(float p);//Delay ms
+	void G5(float i, float j, float p, float q, float x, float y, float wPos);
+	void G6(float angle1, float angle2, float angle3, float distance);
+	void G28();//Homing
+private:
+	uint16_t NumberSegment;
+
+	bool LinearInterpolation();
+
+	bool CircleInterpolation(float i, float j, bool clockwise);
+	bool CircleInterpolation(float r, bool clockwise);
+
+	bool Bezier4PointInterpolation(Point p1, Point p2);
+
+	void UploadSegment(Angle angle1, Angle angle2, float distance, uint8_t index);
+	void SetHomePosition();
+};
+
+extern MotionClass Motion;
+
+#endif
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "MultiServo.h"
+
+void MultiServoClass::init()
+{
+	CreateServo(AXIS_4, AXIS_4_SERVO_PIN);
+	CreateServo(CLAMP, CLIP_SERVO_PIN);
+}
+
+void MultiServoClass::CreateServo(AXIS axisname, uint8_t pin)
+{
+	Servo_t buffer;
+
+	buffer.lastPosition = 0;
+	buffer.Desired = 0;
+	buffer.servo.attach(pin);
+	buffer.servo.write(90);
+	buffer.Name = axisname;
+
+	AddServo(buffer);
+}
+
+void MultiServoClass::AddAngle(AXIS axisname, uint8_t angle)
+{
+	for (uint8_t i = 0; i < NumberOfServoCreated; i++)
+	{
+		if (ServoArray[i].Name != axisname)
+		{
+			continue;
+		}
+		else
+		{
+			ServoArray[i].Desired = angle;
+			break;
+		}	
+	}
+}
+
+void MultiServoClass::Running()
+{
+	for (uint8_t i = 0; i < NumberOfServoCreated; i++)
+	{
+		if (ServoArray[i].lastPosition != ServoArray[i].Desired)
+		{
+			ServoArray[i].lastPosition = ServoArray[i].Desired;
+			ServoArray[i].servo.write(ServoArray[i].lastPosition);
+		}
+	}
+}
+
+void MultiServoClass::AddServo(Servo_t servo)
+{
+	NumberOfServoCreated++;
+	Servo_t *buffer = new Servo_t[NumberOfServoCreated];
+	for (uint8_t i = 0; i < NumberOfServoCreated - 1; i++)
+	{
+		buffer[i] = ServoArray[i];
+	}
+
+	buffer[NumberOfServoCreated - 1] = servo;
+
+	if (ServoArray != NULL)
+	{
+		delete[] ServoArray;
+	}
+
+	ServoArray = buffer;
+}
+
+MultiServoClass MultiServo;
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+// MultiServo.h
+
+#ifndef _MULTISERVO_h
+#define _MULTISERVO_h
+
+#if defined(ARDUINO) && ARDUINO >= 100
+	#include "arduino.h"
+#else
+	#include "WProgram.h"
+#endif
+
+#include "config.h"
+#include "enum.h"
+
+#include "pin.h"
+#include "Servo.h"
+
+typedef struct
+{
+	uint8_t lastPosition;
+	uint8_t Desired;
+
+	Servo servo;
+	AXIS Name;
+}Servo_t;
+
+class MultiServoClass
+{
+ protected:
+
+
+ public:
+	void init();
+	void CreateServo(AXIS axisname, uint8_t pin);
+	void AddAngle(AXIS axisname, uint8_t angle);
+
+	void Running();
+	Servo_t *ServoArray;
+protected:
+	
+	uint8_t NumberOfServoCreated;
+	long LastTimer;
+	void AddServo(Servo_t servo);
+};
+
+extern MultiServoClass MultiServo;
+
+#endif
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+#pragma once
+
+#ifdef BOARD_RAMPS_14
+//pin theta
+#define THETA1_PULSE_PIN 54
+#define THETA2_PULSE_PIN 60
+#define THETA3_PULSE_PIN 46
+
+#define THETA1_DIRECTION_PIN 55
+#define THETA2_DIRECTION_PIN 61
+#define THETA3_DIRECTION_PIN 48
+
+#define THETA1_ENABLE_PIN 38
+#define THETA2_ENABLE_PIN 56
+#define THETA3_ENABLE_PIN 62
+
+#define THETA1_ENDSTOP_PIN 3
+#define THETA2_ENDSTOP_PIN 14
+#define THETA3_ENDSTOP_PIN 18
+
+#define ENDSTOP_FOR_CHECK_Z_AREA_PIN 18
+
+
+//pin axis
+#ifdef USING_SERVO_FOR_AXIS4
+ #define AXIS_4_SERVO_PIN 11
+#else
+#ifdef USING_STEPER_FOR_AXIS4
+ #define AXIS_4_PULSE_PIN 26
+ #define AXIS_4_DIRECTION_PIN 28
+ #define AXIS_4_ENABLE_PIN 24
+ #define AXIS_4_ENDSTOP_PIN 2
+#endif // USING_STEPER_FOR_AXIS4
+#endif // USING_SERVO_FOR_AXIS4
+
+
+#ifdef USING_SERVO_FOR_AXIS5
+ #define AXIS_5_SERVO_PIN 11
+#else
+#ifdef USING_STEPER_FOR_AXIS5
+ #define AXIS_5_PULSE_PIN 26
+ #define AXIS_5_DIRECTION_PIN 28
+ #define AXIS_5_ENABLE_PIN 24
+ #define AXIS_5_ENDSTOP_PIN 2
+#endif // USING_STEPER_FOR_AXIS5
+#endif // USING_SERVO_FOR_AXIS5
+
+
+#define CHANNEL_A_ENCODER_PIN	20
+#define CHANNEL_B_ENCODER_PIN	21
+
+#define VACCUM_PIN 10
+
+#define CLIP_SERVO_PIN 6
+
+#define SPINDLE_LASER_ENABLE_PIN  10   // Pin should have a pullup/pulldown!
+#define SPINDLE_LASER_PWM_PIN     5   // MUST BE HARDWARE PWM
+
+#define CUSTOM_PWM_PIN	4
+#define CUSTOM_DIR_PIN	16
+
+#define LED_R_PIN	25
+#define LED_G_PIN	23
+#define LED_B_PIN	17
+
+#define EXTRUSDER_PULSE_PIN 26
+#define EXTRUSDER_DIRECTION_PIN 28
+#define EXTRUSDER_ENABLE_PIN 24
+
+//thermistor
+#define THERMISTOR_PIN	PIN_A13
+#define HEATER_PIN	8
+
+#endif // BOARD_RAMPS_14
+
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "Planner.h"
+
+void PlannerClass::init(vector<Segment>* SegmentQueue)
+{
+	StepsPerDeg[0] = (float)THETA1_STEPS_PER_2PI / 360.0;
+	StepsPerDeg[1] = (float)THETA2_STEPS_PER_2PI / 360.0;
+	StepsPerDeg[2] = (float)THETA3_STEPS_PER_2PI / 360.0;
+
+	this->SegmentQueue = SegmentQueue;
+
+	RecalculateBeginEndIntCycle();
+	RecalculateTimeForChangeVelocity();
+
+	LastError[0] = 0;
+	LastError[1] = 0;
+	LastError[2] = 0;
+}
+
+void PlannerClass::AddHomeSegment()
+{
+	float timeForOneStep = 1 / (Data.MovingHomeSpeed * StepsPerDeg[0]);
+	HomingIntCycle = timeForOneStep * TIME_TO_US;
+
+	Segment segbuffer;
+	for (uint8_t i = 0; i < 3; i++)
+	{
+		segbuffer.StepperArray[i].StepsToJump = STEP_NULL;
+		segbuffer.StepperArray[i].Direction = DECREASE;
+	}
+	SegmentQueue->push_back(segbuffer);
+
+	Segment segbuffer2;
+	float offset[3];
+	offset[0] = 10;
+	offset[1] = 10;
+	offset[2] = 10;
+	for (uint8_t i = 0; i < 3; i++)
+	{
+		segbuffer2.StepperArray[i] = ChangeToStep(offset, i);
+	}
+	SegmentQueue->push_back(segbuffer2);
+
+	Segment segbuffer1;
+	for (uint8_t i = 0; i < 3; i++)
+	{
+		segbuffer1.StepperArray[i].StepsToJump = STEP_NULL;
+		segbuffer1.StepperArray[i].Direction = DECREASE;
+	}
+	SegmentQueue->push_back(segbuffer1);
+
+	LastError[0] = 0;
+	LastError[1] = 0;
+	LastError[2] = 0;
+}
+
+void PlannerClass::AddBeginSegment(float* offset, float lengthOfRoad)
+{
+	Segment segbuffer;
+	NumberIntRoad = 0;
+
+	float timeMove = lengthOfRoad / Data.Velocity;
+	segbuffer.NumberINT = roundf(timeMove * TIME_TO_NUMINT);
+
+	for (uint8_t i = 0; i < 3; i++)
+	{
+		segbuffer.StepperArray[i] = ChangeToStep(offset, i);
+		if (segbuffer.NumberINT < segbuffer.StepperArray[i].StepsToJump)
+		{
+			segbuffer.NumberINT = segbuffer.StepperArray[i].StepsToJump;
+		}
+		//Serial.println(segbuffer.StepperArray[i].StepsToJump);
+	}
+
+	NumberIntRoad += segbuffer.NumberINT;
+
+	SegmentQueue->push_back(segbuffer);
+}
+
+void PlannerClass::AddEndSegment(float* offset, float lengthOfRoad)
+{
+	Segment segbuffer;
+
+	float timeMove = lengthOfRoad / Data.Velocity;
+	segbuffer.NumberINT = roundf(timeMove * TIME_TO_NUMINT);
+
+	for (uint8_t i = 0; i < 3; i++)
+	{
+		segbuffer.StepperArray[i] = ChangeToStep(offset, i);
+		if (segbuffer.NumberINT < segbuffer.StepperArray[i].StepsToJump)
+		{
+			segbuffer.NumberINT = segbuffer.StepperArray[i].StepsToJump;
+		}
+		//Serial.println(segbuffer.StepperArray[i].StepsToJump);
+	}
+
+	NumberIntRoad += segbuffer.NumberINT;
+
+	if (NumberIntRoad / 2 < TimeForChangeVelocity)
+	{
+		AccelerationUntil = NumberIntRoad / 2;
+		DecelerateAfter = AccelerationUntil;
+	}
+	else
+	{
+		AccelerationUntil = TimeForChangeVelocity;
+		DecelerateAfter = NumberIntRoad - AccelerationUntil;
+	}
+
+	SegmentQueue->push_back(segbuffer);
+}
+
+void PlannerClass::AddChangeSegment(float* offset, float lengthOfRoad)
+{
+	Segment segbuffer;
+	NumberIntRoad = 0;
+
+	float timeMove = lengthOfRoad / Data.Velocity;
+	segbuffer.NumberINT = roundf(timeMove * TIME_TO_NUMINT);
+
+	for (uint8_t i = 0; i < 3; i++)
+	{
+		segbuffer.StepperArray[i] = ChangeToStep(offset, i);
+		if (segbuffer.NumberINT < segbuffer.StepperArray[i].StepsToJump)
+		{
+			segbuffer.NumberINT = segbuffer.StepperArray[i].StepsToJump;
+		}
+	}
+
+	NumberIntRoad += segbuffer.NumberINT;
+
+	if (NumberIntRoad / 2 < TimeForChangeVelocity)
+	{
+		AccelerationUntil = NumberIntRoad / 2;
+		DecelerateAfter = AccelerationUntil;
+	}
+	else
+	{
+		AccelerationUntil = TimeForChangeVelocity;
+		DecelerateAfter = NumberIntRoad - AccelerationUntil;
+	}
+
+	SegmentQueue->push_back(segbuffer);
+}
+
+void PlannerClass::AddFixedSegment(float* offset, float lengthOfRoad)
+{
+	Segment segbuffer;
+
+	float timeMove = lengthOfRoad / Data.Velocity;
+	segbuffer.NumberINT = roundf(timeMove * TIME_TO_NUMINT);
+
+	for (uint8_t i = 0; i < 3; i++)
+	{
+		segbuffer.StepperArray[i] = ChangeToStep(offset, i);
+		if (segbuffer.NumberINT < segbuffer.StepperArray[i].StepsToJump)
+		{
+			segbuffer.NumberINT = segbuffer.StepperArray[i].StepsToJump;
+		}
+		//Serial.println(segbuffer.StepperArray[i].StepsToJump);
+	}
+
+	NumberIntRoad += segbuffer.NumberINT;
+
+	SegmentQueue->push_back(segbuffer);
+}
+
+void PlannerClass::AddExtrustionSegment(float offset)
+{
+	if (offset == 0)
+	{
+		return;
+	}
+
+	if (offset > 0)
+	{
+		ExtrustionStepsDirection = INCREASE;
+	}
+	else
+	{
+		ExtrustionStepsDirection = DECREASE;
+		offset = -offset;
+	}
+
+	ExtrustionStepsToJump = roundf(offset * EXTRUSTION_STEPS_PER_MM);
+
+	if (NumberIntRoad == 0)
+	{
+		float timeMove = offset / Data.Velocity;
+		NumberIntRoad = roundf(timeMove * TIME_TO_NUMINT);
+
+		Segment segbuffer;
+		segbuffer.NumberINT = NumberIntRoad;
+
+		segbuffer.StepperArray[0].StepsToJump = 0;
+		segbuffer.StepperArray[1].StepsToJump = 0;
+		segbuffer.StepperArray[2].StepsToJump = 0;
+
+		AccelerationUntil = 0;
+		DecelerateAfter = NumberIntRoad;
+
+		SegmentQueue->push_back(segbuffer);
+	}
+}
+
+Step PlannerClass::ChangeToStep(float* offset, uint8_t index)
+{
+	Step stepBuffer;
+
+	float realStepsToJump = offset[index] * StepsPerDeg[index];
+
+	realStepsToJump -= LastError[index];
+
+	if (offset[index] >= 0)
+	{
+		stepBuffer.Direction = INCREASE;
+		realStepsToJump = realStepsToJump;
+	}
+	else
+	{
+		stepBuffer.Direction = DECREASE;
+		realStepsToJump = -realStepsToJump;
+	}
+
+	stepBuffer.StepsToJump = roundf(realStepsToJump);
+
+	LastError[index] = stepBuffer.StepsToJump - realStepsToJump;
+	
+	if (offset[index] < 0)
+	{
+		LastError[index] = -LastError[index];
+	}
+
+	return stepBuffer;
+}
+
+void PlannerClass::SetVelocity(float velocity)
+{
+	if (velocity > DEFAULT_MAX_VELOCITY)
+	{
+		Data.Velocity = DEFAULT_MAX_VELOCITY;
+	}
+	else
+	{
+		Data.Velocity = velocity;
+	}
+
+	if (Data.End_Effector == USE_PRINTER)
+	{
+		Data.Velocity = velocity / 60;
+	}
+
+	RecalculateBeginEndIntCycle();
+	RecalculateTimeForChangeVelocity();
+}
+
+void PlannerClass::SetMaxVelocity(float velocity)
+{
+
+}
+
+void PlannerClass::SetAcceleration(float acceleration)
+{
+	if (acceleration > DEFAULT_MAX_ACCELERATION)
+	{
+		Data.Acceleration = DEFAULT_MAX_ACCELERATION;
+	}
+	else
+	{
+		Data.Acceleration = acceleration;
+	}
+
+	RecalculateTimeForChangeVelocity();
+}
+
+void PlannerClass::SetHomeSpeed(float velocity)
+{
+	Data.MovingHomeSpeed = velocity;
+	float timeForOneStep = 1 / (Data.MovingHomeSpeed * StepsPerDeg[0]);
+	HomingIntCycle = timeForOneStep * TIME_TO_US;
+}
+
+void PlannerClass::SetBeginEndVelocity(float velocity)
+{
+	Data.BeginEndVelocity = velocity;
+	RecalculateBeginEndIntCycle();
+	RecalculateTimeForChangeVelocity();
+}
+
+void PlannerClass::RecalculateTimeForChangeVelocity()
+{
+	float accelTime = (Data.Velocity - Data.BeginEndVelocity) / Data.Acceleration;
+	TimeForChangeVelocity = roundf(accelTime * TIME_TO_NUMINT);
+	a = (BeginEndIntCycle - INTERRUPT_CYCLE_MIN) / (accelTime * TIME_TO_US);
+	if (a < 0)
+	{
+		a = 0;
+	}
+}
+
+void PlannerClass::RecalculateBeginEndIntCycle()
+{
+	BeginEndIntCycle =  Data.Velocity * INTERRUPT_CYCLE_MIN / Data.BeginEndVelocity;
+	if (BeginEndIntCycle < INTERRUPT_CYCLE_MIN)
+	{
+		BeginEndIntCycle = INTERRUPT_CYCLE_MIN;
+	}
+}
+
+PlannerClass Planner;
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+// Planner.h
+
+#ifndef _PLANNER_h
+#define _PLANNER_h
+
+#if defined(ARDUINO) && ARDUINO >= 100
+	#include "arduino.h"
+#else
+	#include "WProgram.h"
+#endif
+
+#include <ArduinoSTL.h>
+#include <vector>
+
+#include "config.h"
+#include "enum.h"
+#include "Constants.h"
+
+using namespace std;
+
+#define US_TO_NUMINT (1.0 / INTERRUPT_CYCLE_MIN)
+#define TIME_TO_US 1000000.0
+#define TIME_TO_NUMINT (1000000.0 / INTERRUPT_CYCLE_MIN)
+#define STEP_NULL 65530
+//#define STEP_NULL 60000
+#define EXTRUSTION_STEPS_PER_MM		92.6
+
+typedef struct
+{
+	uint16_t StepsToJump;
+	bool Direction;
+}Step;
+
+class Segment
+{
+public:
+	Step StepperArray[3];
+	uint32_t NumberINT;
+};
+
+class PlannerClass
+{
+ protected:
+
+ public:
+	void init(vector<Segment>* SegmentQueue);
+	void AddHomeSegment();
+	void AddBeginSegment(float* offset, float lengthOfRoad);
+	void AddEndSegment(float* offset, float lengthOfRoad);
+	void AddChangeSegment(float* offset, float lengthOfRoad);
+	void AddFixedSegment(float* offset, float lengthOfRoad);
+	void AddExtrustionSegment(float offset);
+
+	vector<Segment>* SegmentQueue;
+
+	void SetVelocity(float velocity);
+	void SetMaxVelocity(float velocity);
+	void SetAcceleration(float acceleration);
+	void SetHomeSpeed(float velocity);
+	void SetBeginEndVelocity(float velocity);
+
+	uint16_t GetExtrustionStepsToJump();
+	uint16_t ExtrustionStepsToJump;
+	bool ExtrustionStepsDirection;
+
+	float LastError[3];
+
+	uint32_t AccelerationUntil;
+	uint32_t DecelerateAfter;
+	uint32_t NumberIntRoad;
+
+	float a;
+	float BeginEndIntCycle;
+	float HomingIntCycle;
+
+ private:
+	Step ChangeToStep(float* offset, uint8_t index);
+
+	uint32_t TimeForChangeVelocity;
+
+	float StepsPerDeg[3]; 
+
+	void RecalculateTimeForChangeVelocity();
+	void RecalculateBeginEndIntCycle();
+};
+
+extern PlannerClass Planner;
+
+#endif
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "Servo.h"
+
+Servo::Servo()
+{
+
+}
+
+void Servo::attach(int pin)
+{
+	if (pin == 11)
+	{
+		TCCR1A = 0x0;
+		TCCR1B = 0x0;
+		TCNT1 = 0x0;
+
+		//setting the prescaler to 8 (2MHz):
+		TCCR1B |= (1 << CS11);
+
+		//setting the waveform generation mode to 15:
+		TCCR1A |= (1 << WGM11);
+		TCCR1B |= (1 << WGM12) | (1 << WGM13);
+
+		//setting the the TOP value:
+		ICR1 = MAX_TIMER_COUNT; //results in 50Hz at 2MHz Clock
+
+		//setting the output to non inverted:
+		TCCR1A |= (1 << COM1A1);
+
+		OCR1A = DEFAULT_PULSE_WIDTH; //setting the pulse width
+
+		//OC1A, Port B, Bit 5; setting pin 11 as output:
+		DDRB |= (1 << 5); //bit 5 (pin 11) as output  
+
+		this->servoPin = 11;
+	}
+	else if (pin == 6)
+	{
+		TCCR4A = 0x0;
+		TCCR4B = 0x0;
+		TCNT4 = 0x0;
+
+		//setting the prescaler to 8 (2MHz):
+		TCCR4B |= (1 << CS41);
+
+		//setting the waveform generation mode to 15:
+		TCCR4A |= (1 << WGM41);
+		TCCR4B |= (1 << WGM42) | (1 << WGM43);
+
+		//setting the the TOP value:
+		ICR4 = MAX_TIMER_COUNT; //results in 50Hz at 2MHz Clock
+
+		//setting the output to non inverted:
+		TCCR4A |= (1 << COM4A1);
+
+		OCR4A = DEFAULT_PULSE_WIDTH; //setting the pulse width
+
+		//OC4A, Port H, Bit 3; setting pin 6 as output:
+		DDRH |= (1 << 3); //bit 3 (pin 6) as output  
+
+		this->servoPin = 6;
+	}
+}
+
+void Servo::detach()
+{
+	if (servoPin == 11) {
+		//resetting the control register A and B:
+		TCCR1A = 0x0;
+		TCCR1B = 0x0;
+
+		//resetting the TOP value:
+		ICR1 = 0x0;
+		OCR1A = 0x0;
+
+		DDRB ^= (1 << 5); //bit 5 (pin 11) stop output
+		this->servoPin = 0;
+	}
+	else if (servoPin == 6) {
+		//resetting the control register A and B:
+		TCCR4A = 0x0;
+		TCCR4B = 0x0;
+
+		//resetting the TOP value:
+		ICR4 = 0x0;
+		OCR4A = 0x0;
+
+		DDRH ^= (1 << 3); //bit 3 (pin 6) stop output
+		this->servoPin = 0;
+	}
+}
+
+void Servo::writeMicroseconds(int value)
+{
+	if (value < MIN_PULSE_WIDTH)
+	{
+		value = MIN_PULSE_WIDTH;
+	}
+	else if (value > MAX_PULSE_WIDTH)
+	{
+		value = MAX_PULSE_WIDTH;
+	}
+	if (this->servoPin == 11)
+	{
+		OCR1A = 0x0;
+		OCR1A = value * 2;
+	}
+	else if (this->servoPin == 6)
+	{
+		OCR4A = 0x0;
+		OCR4A = value * 2;
+	}
+}
+
+void Servo::write(int value)
+{
+	value = map(constrain(value, 0, 180), 0, 180, MIN_PULSE_WIDTH, MAX_PULSE_WIDTH);
+    this->writeMicroseconds(value);
+}
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+// Servo.h
+
+#ifndef _SERVO_h
+#define _SERVO_h
+
+#if defined(ARDUINO) && ARDUINO >= 100
+	#include "arduino.h"
+#else
+	#include "WProgram.h"
+#endif
+
+#define MIN_PULSE_WIDTH       544	//the shortest pulse sent to a servo  
+#define MAX_PULSE_WIDTH      2400	//the longest pulse sent to a servo 
+#define DEFAULT_PULSE_WIDTH   1500	//default pulse width when servo is attached
+#define MAX_TIMER_COUNT		20000	//the timer TOP value (for creating 50Hz)
+
+#define MAX_SERVOS				2	//2 Servos can be attached
+
+class Servo
+{
+ protected:
+
+
+ public:
+	Servo();
+	void attach(int pin);				//attach the given pin
+	void detach();						//detach the used pin
+	void write(int value);             // if value is < 200 it is treated as an angle, otherwise as pulse width in microseconds
+	void writeMicroseconds(int value); // write pulse width in microseconds
+private:
+	int servoPin = 0;					//pin number of the attached Servo
+};
+
+#endif
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "Stepper.h"
+
+void StepperClass::init(vector<Segment>* SegmentQueue)
+{
+	this->SegmentQueue = SegmentQueue;
+
+	noInterrupts();
+	
+	// Reset register relate to Timer 5
+	// Reset register relate
+	TCCR5A = TCCR5B = TCNT5 = 0;
+	// Set CTC mode to Timer 5
+	TCCR5B |= (1 << WGM52);
+	// Set prescaler 1 to Timer 5
+	TCCR5B |= (1 << CS50);
+	//Normal port operation, OCxA disconnected
+	TCCR5A &= ~((1 << COM5A1) | (1 << COM5A0) | (1 << COM5B1) | (1 << COM5B0));
+	
+
+	// Setup for Timer 2
+	// Reset register relate
+	TCCR2A = TCCR2B = TCNT2 = 0;
+	// Set CTC mode
+	TCCR2A |= (1 << WGM21);
+	// Set prescaler 1
+	TCCR2B |= (1 << CS20);
+	//Normal port operation, OC2A disconnected
+	TCCR2A &= ~((1 << COM2A1) | (1 << COM2A0) | (1 << COM2B1) | (1 << COM2B0));
+	COMPARE_VALUE_TIMER2 = 80; //5us
+
+	interrupts();
+
+	CreateMotor();
+
+	IsRunningHome = false;
+	IsStoppedMoving = true;
+}
+
+void StepperClass::CreateMotor()
+{
+	ThetaStepMotor[0].Name = THETA_1;
+	setPinMode(THETA_1);
+
+	ThetaStepMotor[1].Name = THETA_2;
+	setPinMode(THETA_2);
+
+	ThetaStepMotor[2].Name = THETA_3;
+	setPinMode(THETA_3);
+
+}
+
+bool StepperClass::GetStateMotor()
+{
+	return IsStoppedMoving;
+}
+
+void StepperClass::UpdateMoveSegment()
+{
+	if (SegmentQueue->size() == 0)
+	{
+		IsStoppedMoving = true;
+		NumberTnterrupt = 0;
+		Planner.NumberIntRoad = 0;
+		Timer = 0;
+		TurnOffTimer5;
+		return;
+	}	
+
+	CurrentMoveSegment = SegmentQueue->operator[](0);
+	SegmentQueue->erase(SegmentQueue->begin());
+
+	for (uint8_t i = 0; i < 3; i++)
+	{
+		setMotorDirection(ThetaStepMotor[i].Name, CurrentMoveSegment.StepperArray[i].Direction);
+		ThetaStepMotor[i].InterruptNumberNextStep = 0;
+		if (CurrentMoveSegment.StepperArray[i].StepsToJump == 0)
+		{
+			ThetaStepMotor[i].NumberInterrupt2Step = STEP_NULL;
+		}
+		else
+		{
+			ThetaStepMotor[i].NumberInterrupt2Step = (float)CurrentMoveSegment.NumberINT / CurrentMoveSegment.StepperArray[i].StepsToJump;
+		}
+	}
+
+	NumberTnterrupt = 0;
+}
+
+void StepperClass::Running()
+{	
+	if (SegmentQueue->size() == 0)
+	{
+		return;
+	}
+
+	CurrentMoveSegment = SegmentQueue->operator[](0);
+	SegmentQueue->erase(SegmentQueue->begin());
+
+	for (uint8_t i = 0; i < 3; i++)
+	{
+		setMotorDirection(ThetaStepMotor[i].Name, CurrentMoveSegment.StepperArray[i].Direction);
+		ThetaStepMotor[i].InterruptNumberNextStep = 0;
+
+		if (CurrentMoveSegment.StepperArray[i].StepsToJump == 0)
+		{
+			ThetaStepMotor[i].NumberInterrupt2Step = STEP_NULL;
+		}
+		else
+		{
+			ThetaStepMotor[i].NumberInterrupt2Step = (float)CurrentMoveSegment.NumberINT / CurrentMoveSegment.StepperArray[i].StepsToJump;
+		}
+	}
+
+	if (Data.End_Effector == USE_PRINTER)
+	{
+		WRITE(EXTRUSDER_DIRECTION_PIN, Planner.ExtrustionStepsDirection);
+		ExtrustionStepMotor.InterruptNumberNextStep = 0;
+
+		if (Planner.ExtrustionStepsToJump == 0)
+		{
+			ExtrustionStepMotor.NumberInterrupt2Step = STEP_NULL;
+		}
+		else
+		{
+			ExtrustionStepMotor.NumberInterrupt2Step = (float)Planner.NumberIntRoad / Planner.ExtrustionStepsToJump;
+		}
+	}
+
+	CurrentCycle = Planner.BeginEndIntCycle;
+	MaxCycle = Planner.BeginEndIntCycle;
+	SetIntCycle(CurrentCycle);
+	
+
+	NumberTnterruptAtMinCycle = 0;
+	TotalTnterruptNumber = 0;
+	IsStoppedMoving = false;
+	TurnOnTimer5;
+}
+
+void StepperClass::Homing()
+{
+	if (SegmentQueue->size() == 0)
+	{
+		IsStoppedMoving = true;
+		IsRunningHome = 0;
+		TurnOffTimer5;
+		SegmentQueue->clear();
+		return;
+	}
+
+	IsRunningHome++;
+
+	CurrentMoveSegment = SegmentQueue->operator[](0);
+	SegmentQueue->erase(SegmentQueue->begin());
+
+	for (uint8_t i = 0; i < 3; i++)
+	{
+		setMotorDirection(ThetaStepMotor[i].Name, CurrentMoveSegment.StepperArray[i].Direction);
+	}
+
+	if (IsRunningHome == 1 || IsRunningHome == 2)
+	{
+		CurrentCycle = Planner.HomingIntCycle;
+	}
+	if (IsRunningHome == 3)
+	{
+		CurrentCycle = Planner.HomingIntCycle * 8;
+	}
+
+	SetIntCycle(CurrentCycle);
+
+	IsStoppedMoving = false;
+	TurnOnTimer5;
+}
+
+void StepperClass::Isr_Execute_Velocity()
+{
+	// Movinghome **********
+	if (IsRunningHome > 0)
+	{
+		Isr_Execute_Movinghome();
+		return;
+	}
+	//**********************
+
+	NumberTnterrupt++;
+	TotalTnterruptNumber++;
+
+	//Execute accel
+
+	if (TotalTnterruptNumber < Planner.AccelerationUntil)
+	{
+		Timer += CurrentCycle;
+		CurrentCycle = MaxCycle - (Timer * Planner.a);
+		if (CurrentCycle < INTERRUPT_CYCLE_MIN)
+		{
+			CurrentCycle = INTERRUPT_CYCLE_MIN;
+		}
+		else
+		{
+			NumberTnterruptAtMinCycle = TotalTnterruptNumber;
+		}
+	}
+	else if (TotalTnterruptNumber > Planner.DecelerateAfter)
+	{
+		if (TotalTnterruptNumber > Planner.NumberIntRoad - NumberTnterruptAtMinCycle)
+		{
+			Timer += CurrentCycle;
+		}	
+		CurrentCycle = MaxCycle + (Timer * Planner.a);
+	}
+	else
+	{
+		Timer = 0;
+		MaxCycle = CurrentCycle;
+	}
+
+	SetIntCycle(CurrentCycle);
+	//Serial.println(CurrentCycle);
+	//Checking jump step and Accumulated error
+	for (uint8_t i = 0; i < 3; i++)
+	{
+		if (ThetaStepMotor[i].InterruptNumberNextStep >= NumberTnterrupt)
+		{
+			continue;
+		}
+		ThetaStepMotor[i].InterruptNumberNextStep += ThetaStepMotor[i].NumberInterrupt2Step;
+		if (CurrentMoveSegment.StepperArray[i].StepsToJump != 0)
+		{
+			CurrentMoveSegment.StepperArray[i].StepsToJump--;
+			writePulsePin(ThetaStepMotor[i].Name, 1);
+		}
+	}
+
+	if (Data.End_Effector == USE_PRINTER)
+	{
+		if (ExtrustionStepMotor.InterruptNumberNextStep < TotalTnterruptNumber)
+		{
+			ExtrustionStepMotor.InterruptNumberNextStep += ExtrustionStepMotor.NumberInterrupt2Step;
+			if (Planner.ExtrustionStepsToJump != 0)
+			{
+				Planner.ExtrustionStepsToJump--;
+				WRITE(EXTRUSDER_PULSE_PIN, HIGH);
+			}
+		}
+	}
+
+	TurnOnTimer2;
+	
+	if (CurrentMoveSegment.StepperArray[0].StepsToJump == 0 && CurrentMoveSegment.StepperArray[1].StepsToJump == 0 && CurrentMoveSegment.StepperArray[2].StepsToJump == 0)
+	//if (NumberTnterrupt >= CurrentMoveSegment.NumberINT - 1)
+	{
+		UpdateMoveSegment();
+	}
+}
+
+void StepperClass::Isr_Execute_Movinghome()
+{
+	EndStops.UpdateStates();
+	for (uint8_t i = 0; i < 3; i++)
+	{
+		if (CurrentMoveSegment.StepperArray[i].StepsToJump > 1000)
+		{
+			if (EndStops.States(ThetaStepMotor[i].Name) == false)
+			{
+				writePulsePin(ThetaStepMotor[i].Name, 1);
+			}
+		}
+		else
+		{
+			if (CurrentMoveSegment.StepperArray[i].StepsToJump > 0)
+			{
+				writePulsePin(ThetaStepMotor[i].Name, 1);
+				CurrentMoveSegment.StepperArray[i].StepsToJump--;
+			}
+					
+		}	
+	}
+
+	SetIntCycle(CurrentCycle);
+	TurnOnTimer2;
+	if (IsRunningHome == 2)
+	{
+		for (uint8_t i = 0; i < 3; i++)
+		{
+			if (CurrentMoveSegment.StepperArray[i].StepsToJump > 0)
+			{
+				return;
+			}		
+		}
+	}
+	else if(IsRunningHome == 1 || IsRunningHome == 3)
+	{
+		if (EndStops.HomingCheck() == false)
+		{
+			return;
+		}
+	}
+	Homing();
+}
+
+//turning pulse pin low
+void StepperClass::Isr_Turn_Pulse_Pin()
+{
+	for (uint8_t i = 0; i < 3; i++)
+	{
+		writePulsePin(ThetaStepMotor[i].Name, 0);
+	}
+
+	if (Data.End_Effector == USE_PRINTER)
+	{
+		WRITE(EXTRUSDER_PULSE_PIN, LOW);
+	}
+	TurnOffTimer2;
+}
+
+void StepperClass::SetIntCycle(float intCycle)
+{
+	int prescaler;
+
+	if (intCycle > 4000)
+	{
+		TCCR5B |= (1 << CS51);
+		TCCR5B &= ~(1 << CS50);
+		prescaler = 8;
+	}
+	else
+	{
+		TCCR5B &= ~(1 << CS51);
+		TCCR5B |= (1 << CS50);
+		prescaler = 1;
+	}
+
+	COMPARE_VALUE_TIMER5 = roundf(intCycle * F_CPU / (1000000.0 * prescaler)) - 1;
+}
+
+void StepperClass::ClearMotorArray()
+{
+	for (int8_t i = 0; i < 3; i++)
+	{
+		//MotorArray[i].StepCounter = 0;
+		ThetaStepMotor[i].InterruptNumberNextStep = 0;
+	}
+}
+
+void StepperClass::setPinMode(AXIS axisname)
+{
+	switch (axisname)
+	{
+	case THETA_1:
+		pinMode(THETA1_ENABLE_PIN, OUTPUT);
+		pinMode(THETA1_PULSE_PIN, OUTPUT);
+		pinMode(THETA1_DIRECTION_PIN, OUTPUT);
+
+		WRITE(THETA1_ENABLE_PIN, LOW);
+		WRITE(THETA1_PULSE_PIN, LOW);
+		WRITE(THETA1_DIRECTION_PIN, DECREASE);
+		break;
+	case THETA_2:
+		pinMode(THETA2_ENABLE_PIN, OUTPUT);
+		pinMode(THETA2_PULSE_PIN, OUTPUT);
+		pinMode(THETA2_DIRECTION_PIN, OUTPUT);
+
+		WRITE(THETA2_ENABLE_PIN, LOW);
+		WRITE(THETA2_PULSE_PIN, LOW);
+		WRITE(THETA2_DIRECTION_PIN, DECREASE);
+		break;
+	case THETA_3:
+		pinMode(THETA3_ENABLE_PIN, OUTPUT);
+		pinMode(THETA3_PULSE_PIN, OUTPUT);
+		pinMode(THETA3_DIRECTION_PIN, OUTPUT);
+
+		WRITE(THETA3_ENABLE_PIN, LOW);
+		WRITE(THETA3_PULSE_PIN, LOW);
+		WRITE(THETA3_DIRECTION_PIN, DECREASE);
+		break;
+
+#ifdef USING_STEPER_FOR_AXIS4
+	case AXIS_4:
+		pinMode(AXIS_4_ENABLE_PIN, OUTPUT);
+		pinMode(AXIS_4_PULSE_PIN, OUTPUT);
+		pinMode(AXIS_4_DIRECTION_PIN, OUTPUT);
+
+		WRITE(AXIS_4_ENABLE_PIN, LOW);
+		WRITE(AXIS_4_PULSE_PIN, LOW);
+		WRITE(AXIS_4_DIRECTION_PIN, DECREASE);
+		break;
+#endif // USING_STEPER_FOR_AXIS4
+
+#ifdef USING_STEPER_FOR_AXIS5
+	case AXIS_5:
+		pinMode(AXIS_5_ENABLE_PIN, OUTPUT);
+		pinMode(AXIS_5_PULSE_PIN, OUTPUT);
+		pinMode(AXIS_5_DIRECTION_PIN, OUTPUT);
+
+		WRITE(AXIS_5_ENABLE_PIN, LOW);
+		WRITE(AXIS_5_PULSE_PIN, LOW);
+		WRITE(AXIS_5_DIRECTION_PIN, DECREASE);
+		break;
+#endif // USING_STEPER_FOR_AXIS5
+
+	default:
+		break;
+	}
+}
+
+void StepperClass::setMotorDirection(AXIS axisname, bool variation)
+{
+	switch (axisname)
+	{
+	case THETA_1:
+		WRITE(THETA1_DIRECTION_PIN, variation);
+		break;
+	case THETA_2:
+		WRITE(THETA2_DIRECTION_PIN, variation);
+		break;
+	case THETA_3:
+		WRITE(THETA3_DIRECTION_PIN, variation);
+		break;
+
+#ifdef USING_STEPER_FOR_AXIS4
+	case AXIS_4:
+		WRITE(AXIS_4_DIRECTION_PIN, variation);
+		break;
+#endif // USING_STEPER_FOR_AXIS4
+
+#ifdef USING_STEPER_FOR_AXIS5
+	case AXIS_5:
+		WRITE(AXIS_5_DIRECTION_PIN, variation);
+		break;
+#endif // USING_STEPER_FOR_AXIS5
+
+	default:
+		break;
+	}
+}
+
+void StepperClass::writePulsePin(AXIS axisname, bool ison)
+{
+	switch (axisname)
+	{
+	case THETA_1:
+		WRITE(THETA1_PULSE_PIN, ison);
+		break;
+	case THETA_2:
+		WRITE(THETA2_PULSE_PIN, ison);
+		break;
+	case THETA_3:
+		WRITE(THETA3_PULSE_PIN, ison);
+		break;
+
+#ifdef USING_STEPER_FOR_AXIS4
+	case AXIS_4:
+		WRITE(AXIS_4_PULSE_PIN, ison);
+		break;
+#endif // USING_STEPER_FOR_AXIS4
+
+#ifdef USING_STEPER_FOR_AXIS5
+	case AXIS_5:
+		WRITE(AXIS_5_PULSE_PIN, ison);
+		break;
+#endif // USING_STEPER_FOR_AXIS5
+
+	default:
+		break;
+	}
+}
+
+void StepperClass::DisanableStepper()
+{
+	WRITE(THETA1_ENABLE_PIN, HIGH);
+	WRITE(THETA2_ENABLE_PIN, HIGH);
+	WRITE(THETA3_ENABLE_PIN, HIGH);
+	if (Data.End_Effector == USE_PRINTER)
+	{
+		WRITE(EXTRUSDER_ENABLE_PIN, HIGH);
+	}	
+}
+
+void StepperClass::EnableStepper()
+{
+	WRITE(THETA1_ENABLE_PIN, LOW);
+	WRITE(THETA2_ENABLE_PIN, LOW);
+	WRITE(THETA3_ENABLE_PIN, LOW);
+	if (Data.End_Effector == USE_PRINTER)
+	{
+		WRITE(EXTRUSDER_ENABLE_PIN, LOW);
+	}
+}
+
+
+ISR(TIMER5_COMPA_vect)
+{
+	Stepper.Isr_Execute_Velocity();
+}
+
+ISR(TIMER2_COMPA_vect)
+{
+	Stepper.Isr_Turn_Pulse_Pin();
+}
+
+
+StepperClass Stepper;
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+// Stepper.h
+
+#ifndef _STEPPER_h
+#define _STEPPER_h
+
+#if defined(ARDUINO) && ARDUINO >= 100
+	#include "arduino.h"
+#else
+	#include "WProgram.h"
+#endif
+
+#include <ArduinoSTL.h>
+#include <vector>
+
+#include <avr/interrupt.h>
+#include "config.h"
+#include "Constants.h"
+#include "enum.h"
+
+#include "pin.h"
+#include "fastio.h"
+
+#include "EndStops.h"
+#include "Planner.h"
+
+using namespace std;
+
+#define COMPARE_VALUE_TIMER5 OCR5A
+#define COMPARE_VALUE_TIMER2 OCR2A
+
+#define TurnOnTimer2 (TIMSK2 |= (1 << OCIE2A))
+#define TurnOffTimer2 (TIMSK2 &= ~(1 << OCIE2A))
+
+#define TurnOnTimer5 (TIMSK5 |= (1 << OCIE5A))
+#define TurnOffTimer5 (TIMSK5 &= ~(1 << OCIE5A))
+
+#ifdef SMOOTHSTEP
+
+#endif // SMOOTHSTEP
+
+#if SMOOTHSTEP == 0
+#define SmoothStep(x) (x)
+#endif
+
+#if SMOOTHSTEP == 1
+#define SmoothStep(x) (x*x*(3 - 2*x))
+#endif
+
+#if SMOOTHSTEP == 2
+#define SmoothStep(x) (x*x*x*(10 + x*(6*x - 15)))
+#endif
+
+#if SMOOTHSTEP == 3
+#define SmoothStep(x) (x*x*x*x*(35 + x*(x*(70 - 20*x) - 84)))
+#endif
+
+typedef struct
+{
+	float InterruptNumberNextStep;
+	AXIS Name;
+	float NumberInterrupt2Step;
+}Motor;
+
+class StepperClass
+{
+ protected:
+
+ public:
+	void init(vector<Segment>* SegmentQueue);
+	void CreateMotor();
+
+	bool GetStateMotor();
+
+	void Running();
+	void Homing();
+
+	void Isr_Execute_Velocity();
+	void Isr_Execute_Movinghome();
+	void Isr_Turn_Pulse_Pin();
+
+	void DisanableStepper();
+	void EnableStepper();
+
+	vector<Segment>* SegmentQueue;
+
+ private:
+	 Motor ThetaStepMotor[3];
+	 Motor ExtrustionStepMotor;
+
+	 Segment CurrentMoveSegment;
+
+	 bool	IsStoppedMoving;
+
+	 float Timer;
+	 uint32_t NumberTnterrupt;
+	 uint32_t TotalTnterruptNumber;
+	 uint32_t NumberTnterruptAtMinCycle;
+
+	 uint8_t IsRunningHome;
+
+	 float CurrentCycle;
+	 float MaxCycle;
+
+	 void setPinMode(AXIS axisname);
+	 void UpdateMoveSegment();
+	 void SetIntCycle(float intCycle);
+	 void ClearMotorArray();
+
+	 void setMotorDirection(AXIS axisname, bool variation);
+	 void writePulsePin(AXIS axisname, bool ison);
+};
+
+extern StepperClass Stepper;
+
+#endif
+
+
+/**
+ * Delta X Firmware
+ * Copyright (c) 2020 DeltaXFirmware [https://github.com/deltaxrobot/Delta-X-Firmware]
+ *
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "Storage.h"
+
+void StorageClass::init()
+{
+	
+}
+
+void StorageClass::StorageSettings()
+{
+	EEPROM.put(VELICITY_ADDRESS, Data.Velocity);
+	EEPROM.put(ACCELERATION_ADDRESS, Data.Acceleration);
+
+	EEPROM.put(RD_F_ADDRESS, Data.RD_F);
+	EEPROM.put(RD_E_ADDRESS, Data.RD_E);
+
+	EEPROM.put(RD_RF_ADDRESS, Data.RD_RF);
+	EEPROM.put(RD_RE_ADDRESS, Data.RD_RE);
+
+	EEPROM.put(RD_W_ADDRESS, Data.RD_W);
+	EEPROM.put(RD_U_ADDRESS, Data.RD_U);
+	EEPROM.put(RD_V_ADDRESS, Data.RD_V);
+
+	EEPROM.put(MOVE_AREA_X_ADDRESS, Data.MOVING_AREA_X);
+	EEPROM.put(MOVE_AREA_Y_ADDRESS, Data.MOVING_AREA_Y);
+	EEPROM.put(MOVE_AREA_Z_ADDRESS, Data.MOVING_AREA_Z);
+
+	EEPROM.put(MOVE_AREA_LARGEST_DIAMETER_ADDRESS, Data.MOVING_AREA_LARGEST_DIAMETER);
+
+	EEPROM.put(MOVING_HOME_SPEED_ADDRESS, Data.MovingHomeSpeed);
+	EEPROM.put(BEGIN_END_VELOCITY_ADDRESS, Data.BeginEndVelocity);
+
+	EEPROM.put(ENTRY_VELOCITY_ADDRESS, Data.EntryVelocity);
+	EEPROM.put(EXIT_VELOCITY_ADDRESS, Data.ExitVelocity);
+
+	EEPROM.put(MM_PER_LINEAR_SEGMENT_ADDRESS, Data.MMPerLinearSegment);
+	EEPROM.put(MM_PER_ARC_SEGMENT_ADDRESS, Data.MMPerArcSegment);
+
+	delay(10);
+}
+
+void StorageClass::LoadSettings()
+{
+	EEPROM.get(VELICITY_ADDRESS, Data.Velocity);
+	EEPROM.get(ACCELERATION_ADDRESS, Data.Acceleration);
+
+	EEPROM.get(RD_F_ADDRESS, Data.RD_F);
+	EEPROM.get(RD_E_ADDRESS, Data.RD_E);
+
+	EEPROM.get(RD_RF_ADDRESS, Data.RD_RF);
+	EEPROM.get(RD_RE_ADDRESS, Data.RD_RE);
+
+	EEPROM.get(RD_W_ADDRESS, Data.RD_W);
+	EEPROM.get(RD_U_ADDRESS, Data.RD_U);
+	EEPROM.get(RD_V_ADDRESS, Data.RD_V);
+
+	EEPROM.get(MOVE_AREA_X_ADDRESS, Data.MOVING_AREA_X);
+	EEPROM.get(MOVE_AREA_Y_ADDRESS, Data.MOVING_AREA_Y);
+	EEPROM.get(MOVE_AREA_Z_ADDRESS, Data.MOVING_AREA_Z);
+
+	EEPROM.get(MOVE_AREA_LARGEST_DIAMETER_ADDRESS, Data.MOVING_AREA_LARGEST_DIAMETER);
+
+	EEPROM.get(MOVING_HOME_SPEED_ADDRESS, Data.MovingHomeSpeed);
+
+	EEPROM.get(BEGIN_END_VELOCITY_ADDRESS, Data.BeginEndVelocity);
+
+	EEPROM.get(ENTRY_VELOCITY_ADDRESS, Data.EntryVelocity);
+	EEPROM.get(EXIT_VELOCITY_ADDRESS, Data.ExitVelocity);
+
+	EEPROM.get(MM_PER_LINEAR_SEGMENT_ADDRESS, Data.MMPerLinearSegment);
+	EEPROM.get(MM_PER_ARC_SEGMENT_ADDRESS, Data.MMPerArcSegment);
+
+	delay(10);
+}
+
+void StorageClass::RestoreSettings()
+{
+	Data.ResetData();
+	StorageSettings();
+}
+
+StorageClass Storage;
+
