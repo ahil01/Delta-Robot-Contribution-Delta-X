@@ -10,7 +10,7 @@ A rigid, vision-guided Delta robot built for speed and precision. Powered by a 3
 * **NEMA 23 Stepper Motors:** Upgraded from smaller steppers to provide higher torque, faster accelerations, and payload headroom.
 * **Anti-Backlash Joints:** Integrated zero-backlash ball joints/linkages to eliminate slop and ensure repeatable sub-millimeter positioning.
 * **Reinforced Arm Assembly:** Thicker carbon/aluminum upper and lower arm rods designed to eliminate deflection during rapid moves.
-* 
+  
 <img width="216" height="233" alt="neam 23" src="https://github.com/user-attachments/assets/3db07be1-dd11-4a73-a9eb-f0f424b12e11" />
 
 <img width="1212" height="788" alt="Screenshot 2026-08-20 110954" src="https://github.com/user-attachments/assets/581cf054-e96b-4adf-b411-a22d2ee27453" />
