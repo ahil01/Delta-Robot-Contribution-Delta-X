@@ -10,23 +10,30 @@ A rigid, vision-guided Delta robot built for speed and precision. Powered by a 3
 * **NEMA 23 Stepper Motors:** Upgraded from smaller steppers to provide higher torque, faster accelerations, and payload headroom.
 * **Anti-Backlash Joints:** Integrated zero-backlash ball joints/linkages to eliminate slop and ensure repeatable sub-millimeter positioning.
 * **Reinforced Arm Assembly:** Thicker carbon/aluminum upper and lower arm rods designed to eliminate deflection during rapid moves.
+* 
+<img width="216" height="233" alt="neam 23" src="https://github.com/user-attachments/assets/3db07be1-dd11-4a73-a9eb-f0f424b12e11" />
 
 <img width="1212" height="788" alt="Screenshot 2026-08-20 110954" src="https://github.com/user-attachments/assets/581cf054-e96b-4adf-b411-a22d2ee27453" />
 <img width="1917" height="1073" alt="Screenshot 2026-08-16 010918" src="https://github.com/user-attachments/assets/f38e2c75-d724-4948-8bae-cdaeeb3bc4e9" />
+<img width="1149" height="753" alt="Screenshot 2026-08-16 194044" src="https://github.com/user-attachments/assets/dce87ba7-acf3-48cf-baee-bcefb1a2ac9e" />
+
 
 ### 2. Rigid 2040 Extrusion Frame
 * **Structural Stability:** Built using heavy **2040 aluminum extrusion profiles** to dampen high-frequency vibrations during aggressive pick-and-place trajectories.
 * **Magnetic Quick-Release Base:** Modular top base held magnetically for quick servicing, maintenance, and toolhead adjustments.
+* <img width="1262" height="769" alt="Screenshot 2026-08-16 172514" src="https://github.com/user-attachments/assets/7ee78890-fad6-43f8-9df7-0b4554150132" />
 
 * <img width="1402" height="713" alt="Screenshot 2026-08-16 160925" src="https://github.com/user-attachments/assets/8582c84d-dee1-488a-a7f5-cced2006d4cf" />
-<img width="1262" height="769" alt="Screenshot 2026-08-16 172514" src="https://github.com/user-attachments/assets/7ee78890-fad6-43f8-9df7-0b4554150132" />
+
 
 
 ### 3. Modern 32-Bit Electronics & Connectivity
 * **MKS Pico Controller:** 32-bit board running silent **TMC2209 stepper drivers** in UART mode for ultra-quiet operation and precise microstepping.
 * **Raspberry Pi Integration:** Onboard SBC handling high-level motion planning, Wi-Fi, Bluetooth, and computer vision feeds.
 * **Adjustable Vision Mount:** Integrated camera bracket with angle adjustment for automated object detection and sorting.
-* <img width="447" height="447" alt="raspbery pi" src="https://github.com/user-attachments/assets/618680d2-ae36-45bd-b3ec-b8dbb59424ea" />
+
+<img width="554" height="554" alt="rasp 5" src="https://github.com/user-attachments/assets/ed1e4b0f-c0dd-475c-8a7e-4626461ba208" />
+
 ![Uploading Screenshot 2026-08-19 171546.png…]()
 <img width="1919" height="1079" alt="Screenshot 2026-08-16 010600" src="https://github.com/user-attachments/assets/1d0bf0b2-c5f0-4779-95b6-e0192e98d9d8" />
 
@@ -35,6 +42,7 @@ A rigid, vision-guided Delta robot built for speed and precision. Powered by a 3
 ### 4. 3D Printability & Hardware Fastening
 * **Heat-Set Threaded Inserts:** Replaced loose hex nuts across all structural parts with standard brass heat-set insertion nuts for durable, repeatable assembly.
 * **FDM-Optimized Geometry:** Redesigned printed brackets to print cleanly with minimal supports and maximum layer-bond strength along load axes.![Uploading mks.jpg…]()
+<img width="1482" height="783" alt="Screenshot 2026-08-20 111124" src="https://github.com/user-attachments/assets/5fa5a924-5939-43db-8e57-f8bb002d30c8" />
 
 
 ---
