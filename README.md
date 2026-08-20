@@ -34,8 +34,10 @@ A rigid, vision-guided Delta robot built for speed and precision. Powered by a 3
 
 <img width="554" height="554" alt="rasp 5" src="https://github.com/user-attachments/assets/ed1e4b0f-c0dd-475c-8a7e-4626461ba208" />
 
-![Uploading Screenshot 2026-08-19 171546.png…]()
-<img width="1919" height="1079" alt="Screenshot 2026-08-16 010600" src="https://github.com/user-attachments/assets/1d0bf0b2-c5f0-4779-95b6-e0192e98d9d8" />
+ <img width="1800" height="1600" alt="mks" src="https://github.com/user-attachments/assets/92cc35c0-5f4e-4b2a-aff0-4ece4e95b60b" />
+  <img width="725" height="724" alt="Screenshot 2026-08-16 154953" src="https://github.com/user-attachments/assets/a60250cc-110b-4c9f-b11d-7fb2a01e2f09" />
+
+
 
 
 
