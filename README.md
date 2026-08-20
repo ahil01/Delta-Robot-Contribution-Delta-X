@@ -11,7 +11,7 @@ A rigid, vision-guided Delta robot built for speed and precision. Powered by a 3
 * **Anti-Backlash Joints:** Integrated zero-backlash ball joints/linkages to eliminate slop and ensure repeatable sub-millimeter positioning.
 * **Reinforced Arm Assembly:** Thicker carbon/aluminum upper and lower arm rods designed to eliminate deflection during rapid moves.
   
-<img width="216" height="233" alt="neam 23" src="https://github.com/user-attachments/assets/3db07be1-dd11-4a73-a9eb-f0f424b12e11" />
+                                                   <img width="216" height="233" alt="neam 23" src="https://github.com/user-attachments/assets/3db07be1-dd11-4a73-a9eb-f0f424b12e11" />
 
 <img width="1212" height="788" alt="Screenshot 2026-08-20 110954" src="https://github.com/user-attachments/assets/581cf054-e96b-4adf-b411-a22d2ee27453" />
 <img width="1917" height="1073" alt="Screenshot 2026-08-16 010918" src="https://github.com/user-attachments/assets/f38e2c75-d724-4948-8bae-cdaeeb3bc4e9" />
